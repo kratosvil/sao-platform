@@ -1,19 +1,37 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Secrets — never commit these
 .env
 .env.*
+*.tfvars
+!terraform.tfvars.example
+*.tfbackend
+!backend.tfbackend.example
+
+# Terraform state and cache
 *.tfstate
 *.tfstate.backup
 .terraform/
 .terraform.lock.hcl
-*.tfvars
-!terraform.tfvars.example
+
+# Lambda build artifacts
+*.zip
+collector.zip
+
+# Python packaging
 dist/
 build/
 *.egg-info/
 .venv/
 venv/
+
+# Test artifacts
 .pytest_cache/
 htmlcov/
 .coverage
+
+# IDE
+.vscode/
+.idea/

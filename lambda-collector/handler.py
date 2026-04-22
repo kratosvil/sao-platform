@@ -1,7 +1,7 @@
 import json
 import os
 import boto3
-from collectors import TfstateCollector, CloudWatchCollector
+from collectors import TfstateCollector
 
 TFSTATE_BUCKET = os.environ["TFSTATE_BUCKET"]
 TFSTATE_KEY = os.environ.get("TFSTATE_KEY", "sovereign-ops/terraform.tfstate")
@@ -12,16 +12,19 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 def handler(event: dict, context) -> dict:
     """
-    Entry point Lambda.
-    Dispara en dos casos:
-    - S3 event: nuevo tfstate subido (topology update)
-    - EventBridge scheduled: actualizar dynamic_state cada 5 min
+    Dispara cuando hay un nuevo tfstate en S3.
+    Actualiza el Digital Twin: topology, governance, precedents, constraints.
+    dynamic_state (alarmas, metricas) lo obtiene el MCP Server en tiempo real
+    al momento del incidente — no se cachea aqui.
     """
-    source = event.get("source", "scheduled")
-
     s3 = boto3.client("s3", region_name=AWS_REGION)
 
-    # Cargar grafo existente o iniciar desde cero
+    tfstate_key = (
+        event.get("key")
+        or event.get("detail", {}).get("object", {}).get("key")
+        or TFSTATE_KEY
+    )
+
     try:
         existing = json.loads(
             s3.get_object(Bucket=GRAPH_BUCKET, Key=GRAPH_KEY)["Body"].read()
@@ -33,25 +36,17 @@ def handler(event: dict, context) -> dict:
             "ontology_standard": "Agentic-IaC-v1",
             "topology": {"nodes": [], "edges": []},
             "governance": {"frameworks": ["ConstitutionalAI"], "denied_actions": [], "mandatory_tags": {}},
-            "dynamic_state": {"active_alarms": [], "agent_locks": {}, "alarm_correlations": []},
             "precedents": {"remediations": []},
             "constraints": {"maintenance_windows": [], "forbidden_ops": []},
         }
 
-    # Actualizar topologia si hay nuevo tfstate
-    if source in ("s3", "local", "manual"):
-        tfcollector = TfstateCollector(TFSTATE_BUCKET, AWS_REGION)
-        tfstate = tfcollector.load_tfstate(TFSTATE_KEY)
-        nodes = tfcollector.extract_nodes(tfstate)
-        edges = tfcollector.extract_edges(tfstate, nodes)
-        existing["topology"]["nodes"] = nodes
-        existing["topology"]["edges"] = edges
+    tfcollector = TfstateCollector(TFSTATE_BUCKET, AWS_REGION)
+    tfstate = tfcollector.load_tfstate(tfstate_key)
+    nodes = tfcollector.extract_nodes(tfstate)
+    edges = tfcollector.extract_edges(tfstate, nodes)
+    existing["topology"]["nodes"] = nodes
+    existing["topology"]["edges"] = edges
 
-    # Actualizar dynamic_state siempre
-    cw = CloudWatchCollector(AWS_REGION)
-    existing["dynamic_state"]["active_alarms"] = cw.get_active_alarms()
-
-    # Persistir grafo actualizado
     s3.put_object(
         Bucket=GRAPH_BUCKET,
         Key=GRAPH_KEY,
@@ -63,8 +58,8 @@ def handler(event: dict, context) -> dict:
     return {
         "statusCode": 200,
         "body": {
-            "nodes_updated": len(existing["topology"]["nodes"]),
-            "edges_updated": len(existing["topology"]["edges"]),
-            "active_alarms": existing["dynamic_state"]["active_alarms"],
+            "nodes_updated": len(nodes),
+            "edges_updated": len(edges),
+            "tfstate_key": tfstate_key,
         },
     }

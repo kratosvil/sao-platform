@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored) and fill in your values
+
+aws_region              = "us-east-1"
+environment             = "prod"
+graph_bucket_name       = "YOUR_PREFIX-sao-graph"
+tfstate_bucket_name     = "YOUR_TFSTATE_BUCKET"
+operator_email          = "your-email@example.com"
+slack_webhook_ssm_param = "/sao/slack/webhook_url"

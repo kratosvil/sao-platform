@@ -8,13 +8,10 @@ terraform {
     }
   }
 
-  backend "s3" {
-    bucket         = "kratosvil-tfstate-805778285334"
-    key            = "sao-platform/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "kratosvil-tflock"
-    encrypt        = true
-  }
+  # Backend config via -backend-config flag or terraform.tfbackend (never hardcode)
+  # terraform init -backend-config=backend.tfbackend
+  # See terraform/backend.tfbackend.example for the required format
+  backend "s3" {}
 }
 
 provider "aws" {

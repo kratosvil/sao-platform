@@ -15,8 +15,7 @@ variable "graph_bucket_name" {
 
 variable "tfstate_bucket_name" {
   type        = string
-  default     = "kratosvil-tfstate-805778285334"
-  description = "Bucket del tfstate — el Lambda Collector lee de aqui"
+  description = "Bucket del tfstate — el Lambda Collector lee de aqui. Formato: <prefix>-tfstate-<account_id>"
 }
 
 variable "slack_webhook_ssm_param" {

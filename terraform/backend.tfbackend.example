@@ -1,0 +1,8 @@
+# Copy this file to backend.tfbackend (gitignored) and fill in your values
+# Usage: terraform init -backend-config=backend.tfbackend
+
+bucket         = "YOUR_TFSTATE_BUCKET"
+key            = "sao-platform/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "YOUR_TFLOCK_TABLE"
+encrypt        = true

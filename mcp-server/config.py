@@ -2,7 +2,7 @@ import os
 
 # AWS
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-TFSTATE_BUCKET = os.getenv("TFSTATE_BUCKET", "kratosvil-tfstate-805778285334")
+TFSTATE_BUCKET = os.getenv("TFSTATE_BUCKET")          # required — set in env or ECS task def
 GRAPH_BUCKET = os.getenv("GRAPH_BUCKET", "")          # S3 bucket para el grafo
 GRAPH_KEY = os.getenv("GRAPH_KEY", "sao/digital_twin.json")
 
