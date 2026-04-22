@@ -1,0 +1,157 @@
+{
+  "digital_twin_id": "SAO-CORE-VPC-PROD-001",
+  "version": "2026.04.22",
+  "ontology_standard": "Agentic-IaC-v1",
+  "metadata": {
+    "tier": "Platform",
+    "compliance_scope": ["SOC2", "HIPAA"],
+    "sovereign_enclave": true,
+    "description": "Digital Twin Context Map — fuente de verdad para razonamiento de agentes SAO"
+  },
+  "layers": {
+    "topology": {
+      "nodes": [
+        {
+          "id": "sovereign-processor",
+          "type": "AWS::Lambda::Function",
+          "tfstate_address": "module.sovereign_ops.aws_lambda_function.processor",
+          "properties": {
+            "runtime": "python3.12",
+            "memory_size": 512,
+            "timeout": 300,
+            "vpc_config": {
+              "subnet_ids": ["subnet-XXXX"],
+              "security_group_ids": ["sg-XXXX"]
+            }
+          },
+          "tags": { "ManagedBy": "SAO", "Environment": "Prod" }
+        },
+        {
+          "id": "sovereign-mcp-service",
+          "type": "AWS::ECS::Service",
+          "tfstate_address": "module.sovereign_ops.aws_ecs_service.mcp_server",
+          "properties": {
+            "cluster": "sovereign-ops-cluster",
+            "desired_count": 2,
+            "launch_type": "FARGATE"
+          },
+          "tags": { "ManagedBy": "SAO", "Environment": "Prod" }
+        },
+        {
+          "id": "sovereign-graph-store",
+          "type": "AWS::S3::Bucket",
+          "tfstate_address": "aws_s3_bucket.graph_store",
+          "properties": {
+            "versioning": true,
+            "encryption": "aws:kms",
+            "public_access_block": true
+          },
+          "tags": { "ManagedBy": "SAO", "Environment": "Prod" }
+        }
+      ],
+      "edges": [
+        {
+          "head": "sovereign-processor",
+          "relation": "SECURED_BY",
+          "tail": "sg-lambda",
+          "properties": {}
+        },
+        {
+          "head": "sovereign-mcp-service",
+          "relation": "WRITES_TO",
+          "tail": "sovereign-graph-store",
+          "properties": { "operation": "put_object" }
+        },
+        {
+          "head": "sovereign-processor",
+          "relation": "READS_FROM",
+          "tail": "sovereign-graph-store",
+          "properties": { "operation": "get_object" }
+        }
+      ]
+    },
+    "governance_and_policy": {
+      "frameworks": ["ConstitutionalAI", "Guardrails-v2"],
+      "denied_actions": [
+        {
+          "tool": "terraform",
+          "action": "destroy",
+          "target": "rds-*",
+          "condition": "is_prod"
+        },
+        {
+          "tool": "kubectl",
+          "action": "delete-namespace",
+          "target": "kube-system",
+          "condition": "always"
+        },
+        {
+          "tool": "boto3",
+          "action": "delete_bucket",
+          "target": "sovereign-*",
+          "condition": "always"
+        }
+      ],
+      "mandatory_tags": {
+        "ManagedBy": "SAO",
+        "Owner": "SamirVilla",
+        "Environment": "Prod"
+      },
+      "compliance_scope": ["SOC2", "HIPAA"]
+    },
+    "dynamic_state": {
+      "cloudwatch_correlations": [
+        {
+          "alarm_name": "sovereign-aiops-lambda-timeout",
+          "impact_nodes": ["sovereign-processor"],
+          "causal_hints": [
+            "Check downstream RDS connection pool",
+            "Check VPC endpoint latency",
+            "Verify Lambda timeout vs downstream SLA"
+          ],
+          "severity": "MEDIUM"
+        },
+        {
+          "alarm_name": "sovereign-aiops-ecs-desired-zero",
+          "impact_nodes": ["sovereign-mcp-service"],
+          "causal_hints": [
+            "Check ECS task definition health",
+            "Verify IAM role permissions",
+            "Check ECS agent connectivity"
+          ],
+          "severity": "HIGH"
+        }
+      ],
+      "active_alarms": [],
+      "agent_locks": {}
+    },
+    "precedents": {
+      "remediations": [
+        {
+          "timestamp": "2026-04-18T22:00:00Z",
+          "agent": "DeathKnight-01",
+          "intent": "Optimize Lambda timeout",
+          "action": "boto3.update_function_configuration(timeout=300)",
+          "outcome": "Success",
+          "confidence": 0.98,
+          "nodes_affected": ["sovereign-processor"]
+        }
+      ]
+    },
+    "constraint_topology": {
+      "maintenance_windows": [
+        {
+          "id": "mw-prod-weekly",
+          "day": "Sunday",
+          "time_utc": "04:00-06:00",
+          "allowed_ops": ["terraform apply", "kubectl rollout restart"]
+        }
+      ],
+      "forbidden_ops": [
+        "No vertical scaling de RDS durante horario laboral (08:00-18:00 COT)",
+        "No terraform destroy en recursos con tag Environment=Prod sin aprobacion HIGH",
+        "No modificar security groups sin HITL independientemente del riesgo"
+      ]
+    }
+  }
+}
