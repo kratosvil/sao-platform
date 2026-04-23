@@ -66,14 +66,14 @@ def _get_cloudwatch_context(alarm_name: str, node_id: str, region: str) -> dict:
     log_group = f"/aws/lambda/{node_id}"
     try:
         end = datetime.now(tz=timezone.utc)
-        start = end - timedelta(minutes=30)
+        start = end - timedelta(minutes=5)
         resp = logs.filter_log_events(
             logGroupName=log_group,
             startTime=int(start.timestamp() * 1000),
             endTime=int(end.timestamp() * 1000),
-            limit=50,
+            limit=10,
         )
-        context["recent_logs"] = [e["message"] for e in resp.get("events", [])]
+        context["recent_logs"] = [e["message"][:200] for e in resp.get("events", [])]
     except Exception as e:
         logger.warning("Could not fetch logs for %s: %s", log_group, e)
         context["recent_logs"] = []
@@ -93,8 +93,8 @@ An alarm has fired. Analyze the full context and propose an exact, safe remediat
 ## Alarm state (real-time)
 {json.dumps(cw_context.get('alarm_state', {}), indent=2, default=str)}
 
-## Recent logs (last 30 min)
-{chr(10).join(cw_context.get('recent_logs', ['No logs available'])[:20])}
+## Recent logs (last 5 min)
+{chr(10).join(cw_context.get('recent_logs', ['No logs available']))}
 
 ## Infrastructure context (from Digital Twin)
 {json.dumps(graph_context, indent=2, default=str)}
