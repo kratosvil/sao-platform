@@ -1,4 +1,7 @@
-.PHONY: install dev test lint run-mcp build-collector collector-local clean
+ECR_URL = 805778285334.dkr.ecr.us-east-1.amazonaws.com/sao-mcp-server
+AWS_REGION = us-east-1
+
+.PHONY: install dev test lint run-mcp build-collector docker-build docker-push docker-deploy collector-local clean
 
 install:
 	pip install -r mcp-server/requirements.txt
@@ -28,6 +31,26 @@ build-collector:
 	cd /tmp/sao-collector-build && zip -r9 $(CURDIR)/lambda-collector/collector.zip . -x "*.pyc" -x "*/__pycache__/*"
 	@echo "ZIP generado: lambda-collector/collector.zip"
 	@du -sh lambda-collector/collector.zip
+
+# Login ECR + build imagen MCP Server
+docker-build:
+	aws ecr get-login-password --region $(AWS_REGION) | \
+		docker login --username AWS --password-stdin $(ECR_URL)
+	docker build -t sao-mcp-server:latest .
+	docker tag sao-mcp-server:latest $(ECR_URL):latest
+
+# Push imagen al ECR
+docker-push: docker-build
+	docker push $(ECR_URL):latest
+
+# Force new ECS deployment (despues de push)
+docker-deploy: docker-push
+	aws ecs update-service \
+		--cluster sao-platform-cluster \
+		--service sao-platform-service \
+		--force-new-deployment \
+		--region $(AWS_REGION) \
+		--no-cli-pager
 
 # Ejecutar el collector localmente contra AWS (requiere credenciales)
 collector-local:

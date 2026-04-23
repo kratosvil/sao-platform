@@ -34,3 +34,32 @@ variable "tfstate_kms_key_arn" {
   default     = null
   description = "ARN de la KMS key usada para cifrar el tfstate bucket. Requerido si el bucket usa SSE-KMS."
 }
+
+# --- Networking ---
+
+variable "vpc_cidr" {
+  type    = string
+  default = "10.1.0.0/16"
+}
+
+# --- MCP Server (ECS) ---
+
+variable "mcp_server_port" {
+  type    = number
+  default = 8080
+}
+
+variable "mcp_server_cpu" {
+  type    = number
+  default = 512
+}
+
+variable "mcp_server_memory" {
+  type    = number
+  default = 1024
+}
+
+variable "bedrock_model_id" {
+  type    = string
+  default = "us.anthropic.claude-sonnet-4-6"
+}

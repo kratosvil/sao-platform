@@ -2,7 +2,7 @@ import json
 import boto3
 from datetime import datetime
 from .schema import DigitalTwin
-from ..config import GRAPH_BUCKET, GRAPH_KEY, AWS_REGION
+from config import GRAPH_BUCKET, GRAPH_KEY, AWS_REGION
 
 
 class GraphStore:

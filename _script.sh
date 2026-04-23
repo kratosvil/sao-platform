@@ -1,11 +1,3 @@
 #!/bin/bash
-set -e
-
-aws lambda invoke \
-  --function-name sao-lambda-collector \
-  --region us-east-1 \
-  --payload '{"source":"manual","key":"sao-platform/terraform.tfstate"}' \
-  --cli-binary-format raw-in-base64-out \
-  /tmp/sao-response.json
-
-cat /tmp/sao-response.json
+cd ~/Desarrollo/projects/sao-platform/terraform
+terraform plan -no-color 2>&1 | grep -E "^\s*(#|-).*" | grep -v "^$"
