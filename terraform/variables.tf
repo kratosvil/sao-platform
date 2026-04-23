@@ -28,3 +28,9 @@ variable "operator_email" {
   type        = string
   description = "Email del operador para notificaciones HITL fallback"
 }
+
+variable "tfstate_kms_key_arn" {
+  type        = string
+  default     = null
+  description = "ARN de la KMS key usada para cifrar el tfstate bucket. Requerido si el bucket usa SSE-KMS."
+}

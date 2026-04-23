@@ -31,7 +31,6 @@ resource "aws_lambda_function" "collector" {
     variables = {
       TFSTATE_BUCKET = var.tfstate_bucket_name
       GRAPH_BUCKET   = aws_s3_bucket.graph_store.bucket
-      AWS_REGION     = var.aws_region
     }
   }
 }

@@ -18,12 +18,11 @@ run-mcp:
 
 # Empaquetar Lambda Collector — genera lambda-collector/collector.zip
 build-collector:
-	rm -rf /tmp/sao-collector-build
+	rm -rf /tmp/sao-collector-build lambda-collector/collector.zip
 	mkdir -p /tmp/sao-collector-build
-	pip install -r lambda-collector/requirements.txt \
+	pip install -r lambda-collector/requirements-lambda.txt \
 		--target /tmp/sao-collector-build \
-		--quiet \
-		--no-deps boto3 botocore  # ya vienen en el runtime python3.12
+		--quiet
 	cp lambda-collector/handler.py /tmp/sao-collector-build/
 	cp -r lambda-collector/collectors /tmp/sao-collector-build/
 	cd /tmp/sao-collector-build && zip -r9 $(CURDIR)/lambda-collector/collector.zip . -x "*.pyc" -x "*/__pycache__/*"

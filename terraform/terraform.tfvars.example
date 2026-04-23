@@ -6,3 +6,4 @@ graph_bucket_name       = "YOUR_PREFIX-sao-graph"
 tfstate_bucket_name     = "YOUR_TFSTATE_BUCKET"
 operator_email          = "your-email@example.com"
 slack_webhook_ssm_param = "/sao/slack/webhook_url"
+# tfstate_kms_key_arn  = "arn:aws:kms:REGION:ACCOUNT:key/KEY_ID"  # requerido si el bucket usa SSE-KMS

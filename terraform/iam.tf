@@ -40,8 +40,31 @@ resource "aws_iam_role_policy" "collector_s3" {
         Effect = "Allow"
         Action = ["s3:GetObject", "s3:PutObject"]
         Resource = "arn:aws:s3:::${var.graph_bucket_name}/*"
+      },
+      {
+        Sid      = "ListGraph"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = "arn:aws:s3:::${var.graph_bucket_name}"
       }
     ]
+  })
+}
+
+# KMS — descifrar tfstate (solo si el bucket usa SSE-KMS)
+resource "aws_iam_role_policy" "collector_kms" {
+  count = var.tfstate_kms_key_arn != null ? 1 : 0
+  name  = "sao-collector-kms"
+  role  = aws_iam_role.collector.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "DecryptTfstate"
+      Effect   = "Allow"
+      Action   = ["kms:Decrypt", "kms:GenerateDataKey"]
+      Resource = var.tfstate_kms_key_arn
+    }]
   })
 }
 
