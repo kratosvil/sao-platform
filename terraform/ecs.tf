@@ -57,6 +57,12 @@ resource "aws_iam_role_policy" "mcp_server" {
         ]
       },
       {
+        Sid    = "BedrockMarketplace"
+        Effect = "Allow"
+        Action = ["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"]
+        Resource = "*"
+      },
+      {
         Sid    = "ReadGraph"
         Effect = "Allow"
         Action = ["s3:GetObject", "s3:PutObject"]

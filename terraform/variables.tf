@@ -61,5 +61,5 @@ variable "mcp_server_memory" {
 
 variable "bedrock_model_id" {
   type    = string
-  default = "us.anthropic.claude-sonnet-4-6"
+  default = "anthropic.claude-sonnet-4-6"
 }

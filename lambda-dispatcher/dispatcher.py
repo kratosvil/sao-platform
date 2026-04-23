@@ -45,8 +45,12 @@ def handler(event, context):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=29) as resp:
-        body = resp.read()
-
-    print(f"alarm={alarm_name} node={node_id} mcp_status={resp.status} response={body[:200]}")
-    return {"statusCode": resp.status}
+    try:
+        with urllib.request.urlopen(req, timeout=29) as resp:
+            body = resp.read()
+        print(f"alarm={alarm_name} node={node_id} mcp_status={resp.status} response={body[:200]}")
+        return {"statusCode": resp.status}
+    except urllib.error.HTTPError as e:
+        body = e.read()[:200]
+        print(f"alarm={alarm_name} node={node_id} mcp_error={e.code} response={body}")
+        return {"statusCode": e.code}

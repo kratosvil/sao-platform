@@ -132,6 +132,46 @@ def health():
     return {"status": "ok", "bucket": GRAPH_BUCKET}
 
 
+@app.get("/debug/context/{node_id}")
+def debug_context(node_id: str):
+    """Devuelve el contexto del Digital Twin para un nodo — sin llamar a Bedrock."""
+    try:
+        twin = store.load_or_empty("SAO-CORE-VPC-PROD-001")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Digital Twin error: {e}")
+    query = GraphQuery(twin)
+    return {
+        "node_id": node_id,
+        "twin_id": twin.digital_twin_id,
+        "last_updated": str(twin.dynamic_state.last_updated),
+        "total_nodes": len(twin.topology.nodes),
+        "total_edges": len(twin.topology.edges),
+        "context": query.context_for_agent("debug", node_id),
+    }
+
+
+@app.post("/debug/prompt")
+def debug_prompt(event: AlarmEvent):
+    """Devuelve el prompt completo que se enviaría a Bedrock — sin invocarlo."""
+    try:
+        twin = store.load_or_empty("SAO-CORE-VPC-PROD-001")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Digital Twin error: {e}")
+    query = GraphQuery(twin)
+    graph_context = query.context_for_agent(event.alarm_name, event.node_id)
+    cw_context = _get_cloudwatch_context(event.alarm_name, event.node_id, event.region)
+    prompt = _build_prompt(event, graph_context, cw_context)
+    return {
+        "model": BEDROCK_MODEL_ID,
+        "max_tokens": BEDROCK_MAX_TOKENS,
+        "prompt_chars": len(prompt),
+        "prompt_tokens_estimate": len(prompt) // 4,
+        "graph_context": graph_context,
+        "cloudwatch_context": cw_context,
+        "full_prompt": prompt,
+    }
+
+
 @app.post("/incident", response_model=IncidentResponse)
 def handle_incident(event: AlarmEvent):
     logger.info("Incident received: alarm=%s node=%s", event.alarm_name, event.node_id)
@@ -140,7 +180,7 @@ def handle_incident(event: AlarmEvent):
     try:
         twin = store.load_or_empty("SAO-CORE-VPC-PROD-001")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load Digital Twin: {e}")
+        raise HTTPException(status_code=500, detail=f"Digital Twin error: {e}")
 
     # 2. Construir contexto del grafo
     query = GraphQuery(twin)
@@ -166,7 +206,7 @@ def handle_incident(event: AlarmEvent):
         result = json.loads(resp["body"].read())
         proposal = result["content"][0]["text"]
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Bedrock error: {e}")
+        raise HTTPException(status_code=500, detail=f"Bedrock error: {e}")
 
     risk = _extract_risk(proposal)
     logger.info("Proposal generated — risk=%s node=%s", risk, event.node_id)
