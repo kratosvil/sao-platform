@@ -22,3 +22,8 @@ output "vpc_id" {
   value       = module.networking.vpc_id
   description = "VPC ID de la plataforma SAO"
 }
+
+output "hitl_api_url" {
+  value       = aws_apigatewayv2_api.hitl.api_endpoint
+  description = "URL del API Gateway HITL — approve/reject proposals"
+}

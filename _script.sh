@@ -3,7 +3,7 @@
 aws cloudwatch set-alarm-state \
   --alarm-name sao-collector-errors \
   --state-value OK \
-  --state-reason "Reset manual antes de test" \
+  --state-reason "Lambda error rate exceeded threshold" \
   --region us-east-1
 
 sleep 2
@@ -11,7 +11,7 @@ sleep 2
 aws cloudwatch set-alarm-state \
   --alarm-name sao-collector-errors \
   --state-value ALARM \
-  --state-reason "Test manual Fase 3 — SAO Platform end-to-end" \
+  --state-reason "3 consecutive errors detected in Lambda execution" \
   --region us-east-1
 
 echo "Alarma disparada OK→ALARM. Espera ~15s y revisa:"

@@ -14,6 +14,7 @@ BEDROCK_MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "4096"))
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 HITL_SNS_TOPIC = os.getenv("HITL_SNS_TOPIC", "")
 HITL_TIMEOUT_SECONDS = int(os.getenv("HITL_TIMEOUT_SECONDS", "300"))
+HITL_API_URL = os.getenv("HITL_API_URL", "")  # API Gateway URL del executor HITL
 
 # MCP
 MCP_SERVER_NAME = "sao-platform"

@@ -5,6 +5,7 @@ real y llama a Bedrock para obtener una propuesta de fix.
 """
 import json
 import logging
+import uuid
 import boto3
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, HTTPException
@@ -12,7 +13,7 @@ from pydantic import BaseModel
 from context_map import GraphStore, GraphQuery
 from config import (
     AWS_REGION, BEDROCK_MODEL_ID, BEDROCK_MAX_TOKENS,
-    GRAPH_BUCKET, HITL_SNS_TOPIC,
+    GRAPH_BUCKET, HITL_SNS_TOPIC, HITL_API_URL,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -106,11 +107,21 @@ An alarm has fired. Analyze the full context and propose an exact, safe remediat
 4. Check similar precedents for proven fixes.
 5. Propose ONE exact fix with the specific parameters.
 6. Assign risk level: LOW (config change), MEDIUM (restart/scale), HIGH (destructive).
-7. Format your response as:
+7. Format your response EXACTLY as (no extra text before or after these lines):
    ROOT_CAUSE: <one sentence>
-   FIX: <exact boto3 call or action>
+   FIX: <description of the fix in plain English>
    RISK: LOW|MEDIUM|HIGH
    REASON: <why this fix is safe>
+   ACTION: <action_name> [param1=value1 param2=value2 ...]
+
+Available action names for the ACTION line:
+- lambda_update_timeout function_name=<name> timeout=<seconds_int>
+- lambda_update_memory function_name=<name> memory_size=<mb_int>
+- lambda_update_reserved_concurrency function_name=<name> reserved_concurrent_executions=<n_int>
+- ecs_restart_service cluster=<cluster_name> service=<service_name>
+- ecs_update_desired_count cluster=<cluster_name> service=<service_name> desired_count=<n_int>
+- rds_reboot_instance db_instance_identifier=<id>
+- none reason=<brief_explanation_no_spaces_use_underscores>
 """
 
 
@@ -121,6 +132,34 @@ def _extract_risk(proposal: str) -> str:
             if val in ("LOW", "MEDIUM", "HIGH"):
                 return val
     return "MEDIUM"
+
+
+def _parse_action(proposal: str) -> tuple:
+    """Extrae action name y params del ACTION: line. Retorna (action, params_dict)."""
+    for line in proposal.splitlines():
+        if line.startswith("ACTION:"):
+            parts = line.split(":", 1)[1].strip().split()
+            if not parts:
+                return "none", {}
+            action = parts[0]
+            params = {}
+            for part in parts[1:]:
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    params[k] = v
+            return action, params
+    return "none", {"reason": "No_automated_action_specified"}
+
+
+def _save_proposal(token: str, data: dict):
+    """Guarda la propuesta en S3 bajo proposals/{token}.json."""
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    s3.put_object(
+        Bucket=GRAPH_BUCKET,
+        Key=f"proposals/{token}.json",
+        Body=json.dumps(data, default=str).encode(),
+        ContentType="application/json",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -209,16 +248,48 @@ def handle_incident(event: AlarmEvent):
         raise HTTPException(status_code=500, detail=f"Bedrock error: {e}")
 
     risk = _extract_risk(proposal)
-    logger.info("Proposal generated — risk=%s node=%s", risk, event.node_id)
+    action, action_params = _parse_action(proposal)
+    logger.info("Proposal generated — risk=%s action=%s node=%s", risk, action, event.node_id)
 
-    # 5. Publicar en SNS para HITL (Fase 3 lo reemplaza con Slack)
+    # 5. Guardar propuesta en S3 con token unico para HITL
+    token = str(uuid.uuid4())
+    now_ts = datetime.now(tz=timezone.utc).isoformat()
+    try:
+        _save_proposal(token, {
+            "token": token,
+            "alarm_name": event.alarm_name,
+            "node_id": event.node_id,
+            "resource_type": event.resource_type,
+            "proposal_text": proposal,
+            "action": action,
+            "action_params": action_params,
+            "risk_level": risk,
+            "status": "pending",
+            "created_at": now_ts,
+        })
+        logger.info("Proposal saved — token=%s action=%s", token, action)
+    except Exception as e:
+        logger.warning("Could not save proposal to S3: %s", e)
+        token = ""
+
+    # 6. Publicar en SNS con links HITL
     if HITL_SNS_TOPIC:
         try:
+            approve_url = f"{HITL_API_URL}/hitl/approve?token={token}" if token and HITL_API_URL else "N/A"
+            reject_url = f"{HITL_API_URL}/hitl/reject?token={token}" if token and HITL_API_URL else "N/A"
+            hitl_block = (
+                f"\n\n---\nACCION DETECTADA: {action}\n"
+                f"PARAMETROS: {action_params}\n\n"
+                f"Para aprobar y ejecutar el fix automaticamente:\n  APROBAR: {approve_url}\n\n"
+                f"Para rechazar sin tomar ninguna accion:\n  RECHAZAR: {reject_url}\n\n"
+                f"Token: {token}"
+            ) if token else "\n\n[HITL no disponible — propuesta no guardada en S3]"
+
             sns = boto3.client("sns", region_name=AWS_REGION)
             sns.publish(
                 TopicArn=HITL_SNS_TOPIC,
-                Subject=f"[SAO] Incident: {event.alarm_name} — Risk: {risk}",
-                Message=proposal,
+                Subject=f"[SAO] Incidente: {event.alarm_name} — Riesgo: {risk}",
+                Message=proposal + hitl_block,
             )
         except Exception as e:
             logger.warning("SNS publish failed: %s", e)
@@ -229,5 +300,5 @@ def handle_incident(event: AlarmEvent):
         node_id=event.node_id,
         proposal=proposal,
         risk_level=risk,
-        timestamp=datetime.now(tz=timezone.utc).isoformat(),
+        timestamp=now_ts,
     )

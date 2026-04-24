@@ -33,6 +33,7 @@ module "ecs_fargate" {
     { name = "GRAPH_KEY",         value = "sao/digital_twin.json" },
     { name = "BEDROCK_MODEL_ID",  value = var.bedrock_model_id },
     { name = "HITL_SNS_TOPIC",    value = aws_sns_topic.alarms.arn },
+    { name = "HITL_API_URL",      value = aws_apigatewayv2_api.hitl.api_endpoint },
     { name = "SLACK_WEBHOOK_SSM", value = var.slack_webhook_ssm_param },
   ]
 
