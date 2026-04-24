@@ -18,6 +18,12 @@ variable "tfstate_bucket_name" {
   description = "Bucket del tfstate — el Lambda Collector lee de aqui. Formato: <prefix>-tfstate-<account_id>"
 }
 
+variable "tfstate_key" {
+  type        = string
+  description = "Key del tfstate dentro del bucket. Ej: sao-platform/terraform.tfstate"
+  default     = "sao-platform/terraform.tfstate"
+}
+
 variable "slack_webhook_ssm_param" {
   type        = string
   description = "SSM Parameter Store path con la Slack webhook URL"

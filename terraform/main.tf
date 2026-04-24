@@ -30,7 +30,9 @@ resource "aws_lambda_function" "collector" {
   environment {
     variables = {
       TFSTATE_BUCKET = var.tfstate_bucket_name
+      TFSTATE_KEY    = var.tfstate_key
       GRAPH_BUCKET   = aws_s3_bucket.graph_store.bucket
+      GRAPH_KEY      = "sao/digital_twin.json"
     }
   }
 }

@@ -36,6 +36,12 @@ resource "aws_iam_role_policy" "collector_s3" {
         Resource = "arn:aws:s3:::${var.tfstate_bucket_name}/*"
       },
       {
+        Sid      = "ListTfstate"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = "arn:aws:s3:::${var.tfstate_bucket_name}"
+      },
+      {
         Sid    = "ReadWriteGraph"
         Effect = "Allow"
         Action = ["s3:GetObject", "s3:PutObject"]
