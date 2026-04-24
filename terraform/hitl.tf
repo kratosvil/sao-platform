@@ -37,6 +37,12 @@ resource "aws_iam_role_policy" "hitl" {
         Resource = "arn:aws:s3:::${var.graph_bucket_name}/proposals/*"
       },
       {
+        Sid    = "ReadWriteDigitalTwin"
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:PutObject"]
+        Resource = "arn:aws:s3:::${var.graph_bucket_name}/sao/digital_twin.json"
+      },
+      {
         Sid    = "PublishSNS"
         Effect = "Allow"
         Action = ["sns:Publish"]
@@ -80,6 +86,7 @@ resource "aws_lambda_function" "hitl" {
   environment {
     variables = {
       GRAPH_BUCKET   = aws_s3_bucket.graph_store.bucket
+      GRAPH_KEY      = "sao/digital_twin.json"
       HITL_SNS_TOPIC = aws_sns_topic.alarms.arn
     }
   }

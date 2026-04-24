@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 GRAPH_BUCKET = os.getenv("GRAPH_BUCKET", "")
+GRAPH_KEY = os.getenv("GRAPH_KEY", "sao/digital_twin.json")
 SNS_TOPIC = os.getenv("HITL_SNS_TOPIC", "")
 PROPOSALS_PREFIX = "proposals/"
 
@@ -39,6 +40,42 @@ def _notify(subject: str, message: str):
             sns_client.publish(TopicArn=SNS_TOPIC, Subject=subject[:100], Message=message)
         except Exception as e:
             print(f"SNS publish failed: {e}")
+
+
+def _register_precedent(proposal: dict, execution_result: str, resolved_at: str) -> None:
+    """Escribe el precedente del fix ejecutado en el Digital Twin (S3). No-blocking."""
+    if not GRAPH_KEY:
+        return
+    try:
+        obj = s3.get_object(Bucket=GRAPH_BUCKET, Key=GRAPH_KEY)
+        twin = json.loads(obj["Body"].read())
+    except Exception as e:
+        print(f"Could not load Digital Twin for precedent: {e}")
+        return
+
+    precedent = {
+        "timestamp": resolved_at,
+        "agent": "sao-hitl-executor",
+        "intent": proposal.get("alarm_name", "unknown"),
+        "action": proposal.get("action", "none"),
+        "outcome": "Success",
+        "confidence": 1.0,
+        "nodes_affected": [proposal["node_id"]] if proposal.get("node_id") else [],
+    }
+
+    twin.setdefault("precedents", {}).setdefault("remediations", []).append(precedent)
+
+    try:
+        s3.put_object(
+            Bucket=GRAPH_BUCKET,
+            Key=GRAPH_KEY,
+            Body=json.dumps(twin, default=str).encode(),
+            ContentType="application/json",
+            ServerSideEncryption="aws:kms",
+        )
+        print(f"Precedent registered: alarm={precedent['intent']} action={precedent['action']}")
+    except Exception as e:
+        print(f"Could not save Digital Twin with precedent: {e}")
 
 
 def _execute_action(action: str, params: dict) -> str:
@@ -168,6 +205,7 @@ def handler(event, context):
         proposal["execution_result"] = result
         proposal["resolved_at"] = now
         _save_proposal(token, proposal)
+        _register_precedent(proposal, result, now)
         _notify(
             f"[SAO] Fix EJECUTADO — {alarm_name}",
             f"El fix fue ejecutado exitosamente.\n\n"
