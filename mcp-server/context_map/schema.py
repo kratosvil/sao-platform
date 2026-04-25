@@ -61,6 +61,7 @@ class Precedent(BaseModel):
     outcome: str                       # Success | Failed | Partial
     confidence: float
     nodes_affected: list[str] = []
+    embedding: list[float] = Field(default_factory=list)
 
 
 class PrecedentsLayer(BaseModel):

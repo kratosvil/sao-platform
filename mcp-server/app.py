@@ -151,6 +151,20 @@ def _parse_action(proposal: str) -> tuple:
     return "none", {"reason": "No_automated_action_specified"}
 
 
+def _compute_embedding(text: str) -> list[float]:
+    """Llama a Titan Embeddings para vectorizar texto. Retorna [] si falla."""
+    try:
+        bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+        resp = bedrock.invoke_model(
+            modelId="amazon.titan-embed-text-v1",
+            body=json.dumps({"inputText": text[:8000]}),
+        )
+        return json.loads(resp["body"].read())["embedding"]
+    except Exception as e:
+        logger.warning("Titan embedding failed: %s", e)
+        return []
+
+
 def _save_proposal(token: str, data: dict):
     """Guarda la propuesta en S3 bajo proposals/{token}.json."""
     s3 = boto3.client("s3", region_name=AWS_REGION)
@@ -225,7 +239,9 @@ def handle_incident(event: AlarmEvent):
     query = GraphQuery(twin)
     if twin.is_locked(event.node_id):
         raise HTTPException(status_code=409, detail=f"Node {event.node_id} is locked by another agent")
-    graph_context = query.context_for_agent(event.alarm_name, event.node_id)
+    query_text = f"alarm:{event.alarm_name} node:{event.node_id} type:{event.resource_type}"
+    query_embedding = _compute_embedding(query_text)
+    graph_context = query.context_for_agent(event.alarm_name, event.node_id, query_embedding)
 
     # 3. Consultar CloudWatch en tiempo real
     cw_context = _get_cloudwatch_context(event.alarm_name, event.node_id, event.region)

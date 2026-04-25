@@ -43,6 +43,12 @@ resource "aws_iam_role_policy" "hitl" {
         Resource = "arn:aws:s3:::${var.graph_bucket_name}/sao/digital_twin.json"
       },
       {
+        Sid    = "BedrockEmbeddings"
+        Effect = "Allow"
+        Action = ["bedrock:InvokeModel"]
+        Resource = "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v1"
+      },
+      {
         Sid    = "PublishSNS"
         Effect = "Allow"
         Action = ["sns:Publish"]

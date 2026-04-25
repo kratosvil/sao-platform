@@ -42,6 +42,20 @@ def _notify(subject: str, message: str):
             print(f"SNS publish failed: {e}")
 
 
+def _compute_embedding(text: str) -> list:
+    """Vectoriza texto con Titan Embeddings. Retorna [] si falla."""
+    try:
+        bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+        resp = bedrock.invoke_model(
+            modelId="amazon.titan-embed-text-v1",
+            body=json.dumps({"inputText": text[:8000]}),
+        )
+        return json.loads(resp["body"].read())["embedding"]
+    except Exception as e:
+        print(f"Titan embedding failed: {e}")
+        return []
+
+
 def _register_precedent(proposal: dict, execution_result: str, resolved_at: str) -> None:
     """Escribe el precedente del fix ejecutado en el Digital Twin (S3). No-blocking."""
     if not GRAPH_KEY:
@@ -53,14 +67,20 @@ def _register_precedent(proposal: dict, execution_result: str, resolved_at: str)
         print(f"Could not load Digital Twin for precedent: {e}")
         return
 
+    intent = proposal.get("alarm_name", "unknown")
+    action = proposal.get("action", "none")
+    nodes = [proposal["node_id"]] if proposal.get("node_id") else []
+    embed_text = f"alarm:{intent} action:{action} outcome:Success nodes:{' '.join(nodes)}"
+
     precedent = {
         "timestamp": resolved_at,
         "agent": "sao-hitl-executor",
-        "intent": proposal.get("alarm_name", "unknown"),
-        "action": proposal.get("action", "none"),
+        "intent": intent,
+        "action": action,
         "outcome": "Success",
         "confidence": 1.0,
-        "nodes_affected": [proposal["node_id"]] if proposal.get("node_id") else [],
+        "nodes_affected": nodes,
+        "embedding": _compute_embedding(embed_text),
     }
 
     twin.setdefault("precedents", {}).setdefault("remediations", []).append(precedent)
