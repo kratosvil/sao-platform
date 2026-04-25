@@ -1,8 +1,23 @@
-# Copy this file to backend.tfbackend (gitignored) and fill in your values
+# SAO Platform — Terraform remote backend config
+# Copy this file to backend.tfbackend (gitignored) and fill in your values.
 # Usage: terraform init -backend-config=backend.tfbackend
 
-bucket         = "YOUR_TFSTATE_BUCKET"
-key            = "sao-platform/terraform.tfstate"
-region         = "us-east-1"
-dynamodb_table = "YOUR_TFLOCK_TABLE"
-encrypt        = true
+# S3 bucket where Terraform stores the state file for this project.
+# Must already exist. If you use tf-state-backend, use the bucket it created.
+bucket = "mycompany-tfstate"
+
+# Path (key) for this project's state file inside the bucket.
+key = "sao-platform/terraform.tfstate"
+
+region = "us-east-1"
+
+# DynamoDB table used for state locking.
+# Prevents concurrent applies from corrupting the state.
+# If you use tf-state-backend, use the table it created.
+dynamodb_table = "mycompany-tflock"
+
+encrypt = true
+
+# Uncomment if your S3 bucket uses a customer-managed KMS key (SSE-KMS).
+# Must match the key used when the bucket was created.
+# kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"

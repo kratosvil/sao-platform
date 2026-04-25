@@ -1,9 +1,81 @@
-# Copy to terraform.tfvars (gitignored) and fill in your values
+# SAO Platform — Terraform variables
+# Copy this file to terraform.tfvars (gitignored) and fill in your values.
+# Usage: terraform apply -var-file=terraform.tfvars
 
-aws_region              = "us-east-1"
-environment             = "prod"
-graph_bucket_name       = "YOUR_PREFIX-sao-graph"
-tfstate_bucket_name     = "YOUR_TFSTATE_BUCKET"
-operator_email          = "your-email@example.com"
+# ---------------------------------------------------------------------------
+# AWS
+# ---------------------------------------------------------------------------
+
+aws_region  = "us-east-1"
+environment = "prod"
+
+# ---------------------------------------------------------------------------
+# S3 Buckets
+# ---------------------------------------------------------------------------
+
+# S3 bucket for the Digital Twin JSON and HITL proposals.
+# Must be globally unique. Recommended convention: <prefix>-sao-graph
+# This bucket is created by Terraform — do NOT create it manually.
+graph_bucket_name = "mycompany-sao-graph"
+
+# S3 bucket where your terraform.tfstate files are stored.
+# This is the bucket the Lambda Collector reads from to build the Digital Twin.
+# Must already exist. If you use tf-state-backend, this is the bucket it created.
+tfstate_bucket_name = "mycompany-tfstate"
+
+# Path (key) to the tfstate file inside tfstate_bucket_name.
+# Default works if you use the standard sao-platform backend config.
+tfstate_key = "sao-platform/terraform.tfstate"
+
+# KMS key ARN used to encrypt the tfstate bucket (SSE-KMS).
+# Required if your tfstate bucket uses a customer-managed KMS key.
+# If your bucket uses SSE-S3 or AWS managed keys, comment this out.
+# tfstate_kms_key_arn = "arn:aws:kms:us-east-1:123456789012:key/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# ---------------------------------------------------------------------------
+# HITL — Human-in-the-Loop
+# ---------------------------------------------------------------------------
+
+# Email address that receives APPROVE/REJECT notifications for every incident proposal.
+# After terraform apply, AWS SNS will send a confirmation email to this address.
+# You MUST click "Confirm subscription" in that email before HITL works.
+operator_email = "oncall@mycompany.com"
+
+# SSM Parameter Store path that holds the Slack webhook URL.
+# Only needed if you implement Slack HITL (currently not used — HITL is email-based).
+# The parameter must exist in SSM before deploy if ECS reads it at startup.
 slack_webhook_ssm_param = "/sao/slack/webhook_url"
-# tfstate_kms_key_arn  = "arn:aws:kms:REGION:ACCOUNT:key/KEY_ID"  # requerido si el bucket usa SSE-KMS
+
+# ---------------------------------------------------------------------------
+# Bedrock
+# ---------------------------------------------------------------------------
+
+# CRITICAL: Claude 4 models require the cross-region inference profile prefix "us.".
+# Using the plain model ID "anthropic.claude-sonnet-4-6" will fail with:
+#   ValidationException: on-demand throughput not supported
+# Always use the "us." prefixed cross-region inference profile.
+bedrock_model_id = "us.anthropic.claude-sonnet-4-6"
+
+# ---------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------
+
+# CIDR block for the VPC created by SAO Platform.
+# Make sure this does not overlap with existing VPCs in your account if you
+# plan to use VPC peering.
+vpc_cidr = "10.1.0.0/16"
+
+# ---------------------------------------------------------------------------
+# ECS Fargate — MCP Server
+# ---------------------------------------------------------------------------
+
+# Port exposed by the FastAPI app inside the container.
+mcp_server_port = 8080
+
+# CPU units for the ECS task (256 = 0.25 vCPU, 512 = 0.5 vCPU, 1024 = 1 vCPU).
+# 512 is sufficient for the MVP workload.
+mcp_server_cpu = 512
+
+# Memory in MB for the ECS task.
+# 1024 MB is the minimum recommended for Bedrock calls + Digital Twin loading.
+mcp_server_memory = 1024

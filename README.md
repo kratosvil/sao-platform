@@ -322,59 +322,177 @@ make debug-rag
 
 ### Prerequisites
 
-| Tool | Version |
-|------|---------|
-| Python | >= 3.12 |
-| Terraform | >= 1.5 |
-| AWS CLI v2 | latest |
-| Docker | latest |
-| Amazon Bedrock | Claude Sonnet + Titan Embeddings access enabled |
+| Tool | Version | Notes |
+|------|---------|-------|
+| Python | >= 3.12 | For local dev and Lambda packaging |
+| Terraform | >= 1.5 | Remote backend required (S3 + DynamoDB) |
+| AWS CLI v2 | latest | Configured with credentials for the target account |
+| Docker | latest | For building and pushing the MCP Server image |
+| Amazon Bedrock | — | Must request access to: Claude Sonnet (`us.anthropic.claude-sonnet-4-6`) and Titan Embeddings (`amazon.titan-embed-text-v1`) in us-east-1 |
 
-### Steps
+> Bedrock model access can take up to 24h. Request it before starting the deploy.
+
+### Step 1 — Configure
 
 ```bash
 git clone https://github.com/kratosvil/sao-platform.git
 cd sao-platform
 
-# 1. Configure backend and variables
 cp terraform/backend.tfbackend.example terraform/backend.tfbackend
 cp terraform/terraform.tfvars.example  terraform/terraform.tfvars
-# Fill in both files with your AWS account values
+```
 
-# 2. Deploy infrastructure
+Edit `terraform/backend.tfbackend` — set your S3 bucket, DynamoDB table, and region for Terraform state storage.
+
+Edit `terraform/terraform.tfvars` — all values are documented inline. The critical ones:
+
+| Variable | What to set |
+|----------|-------------|
+| `graph_bucket_name` | New unique S3 bucket name (Terraform creates it) |
+| `tfstate_bucket_name` | Existing S3 bucket where your tfstate lives |
+| `operator_email` | Email that receives APPROVE/REJECT HITL links |
+| `bedrock_model_id` | Must be `us.anthropic.claude-sonnet-4-6` — see note below |
+| `tfstate_kms_key_arn` | Only if your tfstate bucket uses SSE-KMS |
+
+### Step 2 — Deploy infrastructure
+
+```bash
 cd terraform
 terraform init -backend-config=backend.tfbackend
+terraform plan -var-file=terraform.tfvars   # review before applying
 terraform apply -var-file=terraform.tfvars
 cd ..
+```
 
-# 3. Build and push MCP Server image
+After `terraform apply`, check the outputs — you will need the ALB DNS name and API Gateway URL.
+
+### Step 3 — Confirm SNS email subscription
+
+AWS sends a confirmation email to `operator_email` after the SNS topic is created.
+**You must click "Confirm subscription" in that email before HITL works.**
+Without this step, no APPROVE/REJECT notifications will be delivered.
+
+### Step 4 — Build and push the MCP Server image
+
+```bash
 make docker-deploy
+```
 
-# 4. Point ECS service to the latest task definition
+This builds the Docker image, pushes it to ECR, and forces a new ECS deployment.
+
+### Step 5 — Point ECS to the correct task definition
+
+```bash
+make fix-taskdef
+```
+
+The ECS module has `ignore_changes = [task_definition]` — the service starts pointing to the first revision (which has no env vars). This command updates it to the latest revision with all env vars injected. **This step is mandatory after every `terraform apply` that changes env vars.**
+
+### Step 6 — Build and deploy the Lambda Collector
+
+```bash
+make build-collector
+
+aws lambda update-function-code \
+  --function-name sao-lambda-collector \
+  --zip-file fileb://lambda-collector/collector.zip \
+  --region us-east-1
+```
+
+### Step 7 — Enable EventBridge notifications on the tfstate bucket
+
+The Lambda Collector fires on S3 events from the tfstate bucket. This requires EventBridge notifications to be enabled on that bucket (it is not enabled by default):
+
+```bash
+aws s3api put-bucket-notification-configuration \
+  --bucket <your-tfstate-bucket> \
+  --notification-configuration '{"EventBridgeConfiguration":{}}'
+```
+
+This is a non-destructive operation — it does not touch any existing Lambda/SNS/SQS notifications.
+
+### Step 8 — Build the initial Digital Twin
+
+Trigger the collector manually to create the Digital Twin JSON before the first incident:
+
+```bash
+aws lambda invoke \
+  --function-name sao-lambda-collector \
+  --payload '{"source":"manual"}' \
+  --region us-east-1 \
+  /tmp/out.json && cat /tmp/out.json
+```
+
+Expected output: `{"statusCode": 200, "body": {"nodes_updated": N, "edges_updated": M, ...}}`
+
+### Step 9 — Verify and test
+
+```bash
+# Verify the Digital Twin was built
+make debug-rag
+
+# Verify the MCP Server is healthy
+curl http://<your-alb-dns>/health
+
+# Run a full end-to-end test (triggers a demo alarm)
+make run_script
+```
+
+---
+
+## Operations Runbook
+
+### After every `terraform apply`
+
+```bash
+# Always run this — ECS module ignores task_definition changes
 make fix-taskdef
 
-# 5. Build and upload Lambda Collector
+# If Lambda Collector code changed
 make build-collector
 aws lambda update-function-code \
   --function-name sao-lambda-collector \
   --zip-file fileb://lambda-collector/collector.zip \
   --region us-east-1
-
-# 6. Trigger the collector to build the initial Digital Twin
-aws lambda invoke \
-  --function-name sao-lambda-collector \
-  --payload '{"source":"manual"}' \
-  --region us-east-1 /tmp/out.json && cat /tmp/out.json
-
-# 7. Test the full incident flow
-make run_script
 ```
 
-### Critical Notes
+### After a HITL-approved fix executes
 
-- Bedrock model **must** use cross-region inference profile: `us.anthropic.claude-sonnet-4-6` — the plain `anthropic.claude-sonnet-4-6` returns `ValidationException: on-demand throughput not supported`.
-- ECS task definition has `ignore_changes = [task_definition]` in the module — always run `make fix-taskdef` after any `terraform apply` that changes env vars.
-- After a HITL-approved fix changes a resource (e.g., Lambda memory), update the corresponding value in `terraform.tfvars` and `main.tf` to prevent IaC drift on the next apply.
+The HITL executor changes AWS resources directly via boto3 (e.g., Lambda memory size). This creates **IaC drift** — Terraform does not know about the change. To fix:
+
+1. Check what changed in the executed proposal: `make show-proposal TOKEN=<uuid>`
+2. Update the corresponding value in `terraform.tfvars` and the resource block in `main.tf`
+3. Run `terraform plan` — it should show zero changes if the values match
+4. Commit the updated tfvars and tf files to keep IaC in sync
+
+### Demo cycle (cost control)
+
+Infrastructure costs ~$0.19/hr (~$137/month) dominated by VPC Interface Endpoints. Tear down between demos:
+
+```bash
+# Tear down (keeps S3 data — Digital Twin and proposals are preserved)
+cd terraform && terraform destroy -var-file=terraform.tfvars
+
+# Restore for next demo (full redeploy — ~15 min)
+terraform apply -var-file=terraform.tfvars
+make docker-deploy
+make fix-taskdef
+```
+
+The Digital Twin JSON in S3 survives `terraform destroy` because the S3 bucket has versioning enabled and Terraform does not empty it on destroy by default.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Bedrock `ValidationException: on-demand throughput not supported` | Wrong model ID | Set `bedrock_model_id = "us.anthropic.claude-sonnet-4-6"` in tfvars |
+| HITL email never arrives | SNS subscription not confirmed | Check email inbox for AWS confirmation email and click the link |
+| HITL links in email show `N/A` | ECS task using old task definition (no env vars) | Run `make fix-taskdef` |
+| ECS task exits immediately | Missing env vars in task definition | Run `make fix-taskdef`, then check `make logs-mcp` |
+| Lambda Collector returns `NoSuchKey` on tfstate | Wrong `tfstate_key` in tfvars | Verify the exact S3 key with `aws s3 ls s3://<bucket> --recursive` |
+| Digital Twin has 0 nodes | tfstate bucket EventBridge notifications not enabled | Run Step 7 above |
+| `make docker-deploy` fails on ECR login | AWS credentials expired or wrong region | Run `aws sts get-caller-identity` to verify credentials |
+| Proposals not appearing in S3 | MCP Server cannot write to graph bucket | Check IAM policy `sao-mcp-server-policy` — `s3:PutObject` on bucket |
 
 ---
 
