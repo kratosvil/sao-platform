@@ -187,6 +187,7 @@ sao-platform/
 │   └── terraform.tfvars.example   # Copy → terraform.tfvars (gitignored)
 └── docs/
     ├── digital_twin_schema.json   # Full Digital Twin schema reference
+    ├── context-map.md             # Internals: data model, GraphQuery, RAG flow, plugin system
     └── extending-digital-twin.md  # Guide: adding new AWS resource types
 ```
 
