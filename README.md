@@ -1,111 +1,131 @@
 # SAO Platform — Sovereign Agentic Operations
 
-Zero-egress AI platform that autonomously resolves AWS infrastructure incidents — powered by a living Knowledge Graph built from your Terraform state.
+Autonomous AWS incident response platform. A CloudWatch alarm fires, an AI agent reasons over a full infrastructure knowledge graph, proposes an exact fix, and executes it — only after a human approves via email. All AI inference stays inside your VPC via PrivateLink.
 
-> An AI agent reads your entire infrastructure graph, reasons with full context, proposes an exact fix, and executes it — only after a human approves via Slack. Data never leaves your VPC.
+> **MVP Status:** End-to-end validated through Phase 8. Production-grade incident flow: detection → Bedrock reasoning → HITL email → boto3 execution → precedent registered in Digital Twin. Fully deployed on AWS.
+
+---
+
+## How It Works
+
+```
+CloudWatch Alarm fires
+       │
+       ▼ EventBridge rule
+Lambda Dispatcher
+       │ POST /incident
+       ▼
+MCP Server (ECS Fargate / FastAPI)
+       ├── Load Digital Twin from S3
+       │     ├── Topology (nodes + edges from Terraform state)
+       │     ├── Governance (denied actions, compliance rules)
+       │     ├── Precedents (past incidents + embeddings — RAG)
+       │     └── Constraints (maintenance windows, forbidden ops)
+       │
+       ├── Query CloudWatch in real-time
+       │     ├── Current alarm state
+       │     └── Recent Lambda logs (last 5 min)
+       │
+       ├── Build semantic query embedding (Titan Embeddings)
+       │   Retrieve similar precedents via cosine similarity
+       │
+       ├── Call Amazon Bedrock (Claude Sonnet — cross-region inference)
+       │   → ROOT_CAUSE / FIX / RISK / REASON / ACTION
+       │
+       ├── Save proposal to S3 (proposals/{token}.json)
+       │
+       └── Publish SNS email:
+             Proposal + APPROVE link + REJECT link
+
+Operator clicks APPROVE
+       │ API Gateway GET /hitl/approve?token=<uuid>
+       ▼
+Lambda HITL Executor
+       ├── Load proposal from S3
+       ├── Execute boto3 action (Lambda / ECS / RDS)
+       ├── Register precedent in Digital Twin
+       │     ├── Titan embedding of incident+outcome
+       │     └── Written back to Digital Twin S3 JSON
+       └── SNS email: confirmation of execution
+
+Total time: alarm → fix executed < 10 minutes
+```
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│  PRIVATE VPC  (zero-egress — Bedrock via PrivateLink)                │
-│                                                                       │
-│  CloudWatch Alarm                                                     │
-│         │                                                             │
-│         ▼ EventBridge                                                 │
-│  ┌──────────────────────┐                                            │
-│  │  Lambda Collector    │ ← fires on S3 event (every terraform apply) │
-│  │                      │   updates topology in the Digital Twin      │
-│  │  Builds / Updates    │                                             │
-│  │  Digital Twin        │                                             │
-│  └──────────┬───────────┘                                            │
-│             │ writes JSON-LD                                          │
-│             ▼                                                         │
-│  ┌──────────────────────┐     PrivateLink      ┌──────────────────┐  │
-│  │  MCP Server          │ ◄──────────────────► │  Amazon Bedrock  │  │
-│  │  (ECS Fargate)       │   (never touches      │  Claude Sonnet   │  │
-│  │                      │    internet)          └──────────────────┘  │
-│  │  sao_load_context    │                                             │
-│  │  sao_validate_action │                                             │
-│  │  sao_execute_action  │ ← Human APPROVE token (Slack button)       │
-│  │  sao_graph_status    │                                             │
-│  └──────────┬───────────┘                                            │
-│             │ boto3 / kubectl / terraform                             │
-│             ▼                                                         │
-│  Lambda / ECS / RDS / EKS ──► CloudTrail (S3 WORM + KMS)            │
-│                                immutable audit log                   │
-└──────────────────────────────────────────────────────────────────────┘
-                       │ Slack HITL Gateway
-                       ▼
-            Operator receives:
-            • Alarm + affected resource (from graph)
-            • Root cause (multi-hop graph traversal)
-            • Proposed fix with exact parameters
-            • Risk level: LOW / MEDIUM / HIGH
-            • Similar past incidents + outcomes
-            Decides: APPROVE / REJECT
+┌─────────────────────────────────────────────────────────────────┐
+│  PRIVATE VPC  (zero-egress — Bedrock via PrivateLink)           │
+│                                                                  │
+│  terraform apply → S3 (tfstate)                                 │
+│         │                                                        │
+│         ▼ S3 event                                               │
+│  ┌──────────────────────┐                                       │
+│  │  Lambda Collector    │  Reads tfstate → extracts nodes/edges │
+│  │                      │  Updates Digital Twin topology in S3  │
+│  └──────────┬───────────┘                                       │
+│             │ writes sao/digital_twin.json (KMS encrypted)      │
+│             ▼                                                    │
+│  ┌──────────────────────┐   PrivateLink    ┌──────────────────┐ │
+│  │  MCP Server          │ ◄──────────────► │  Amazon Bedrock  │ │
+│  │  ECS Fargate/FastAPI │  (no internet)   │  Claude Sonnet   │ │
+│  │                      │                  └──────────────────┘ │
+│  │  POST /incident      │                  ┌──────────────────┐ │
+│  │  GET  /debug/context │ ◄──────────────► │  Titan Embeddings│ │
+│  │  POST /debug/prompt  │                  │  (RAG — Phase 8) │ │
+│  └──────────┬───────────┘                  └──────────────────┘ │
+│             │                                                    │
+│             ▼ proposals/{token}.json                            │
+│  ┌──────────────────────┐                                       │
+│  │  S3 Graph Store      │  Digital Twin + Proposals             │
+│  │  (KMS + Versioning)  │  <your-graph-bucket>                 │
+│  └──────────────────────┘                                       │
+│                                                                  │
+│  SNS email → APPROVE/REJECT links → API Gateway                 │
+│         │                                                        │
+│         ▼                                                        │
+│  ┌──────────────────────┐                                       │
+│  │  Lambda HITL         │  Reads proposal → executes boto3      │
+│  │  Executor            │  Registers precedent + embedding      │
+│  └──────────────────────┘                                       │
+│                                                                  │
+│  Every action: CloudTrail → S3 WORM + KMS (immutable audit)    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## How It Works — Full Incident Flow
+## The Digital Twin — Core Innovation
 
-```
-1. terraform apply runs → tfstate uploaded to S3
-        ↓
-2. S3 event → Lambda Collector fires
-   Reads tfstate → extracts nodes + edges (topology)
-   Updates Digital Twin JSON in S3 (topology only)
-        ↓
-3. CloudWatch alarm triggers → EventBridge → MCP Server
-        ↓
-4. MCP Server loads Digital Twin from S3:
-   - Topology: what resources exist and how they connect
-   - Governance: what actions are forbidden
-   - Dynamic state: active alarms, metrics, agent locks
-   - Precedents: similar incidents resolved before (with outcomes)
-   - Constraints: maintenance windows, forbidden ops
-        ↓
-5. MCP Server calls Bedrock via PrivateLink (zero-egress)
-   Claude reasons with full structured graph context:
-   - Multi-hop traversal to find root cause
-   - Validates proposed fix against governance layer
-   - Checks precedents for similar incidents
-   - Assigns risk level
-        ↓
-6. HITL Gateway sends Slack message with APPROVE / REJECT buttons
-        ↓
-7. Operator approves → MCP Server executes via resource plugin:
-   - LambdaPlugin: update timeout / memory / concurrency
-   - ECSPlugin: scale desired / force-new-deployment
-   - (RDSPlugin, EC2Plugin, EKSPlugin — Fase 4)
-   Every action recorded in CloudTrail + precedents layer
-        ↓
-8. Digital Twin updated with new precedent (confidence score)
-   System gets smarter with each resolved incident
+Not a list of resources. A **living knowledge graph** with 5 layers that enables zero-hallucination AI reasoning:
 
-   Total time: detection → fix executed < 10 minutes
-   Without SAO: 30–90 minutes with on-call engineer
-```
+| Layer | Contents | Source | Updated |
+|-------|----------|--------|---------|
+| **Topology** | Nodes (resources) + edges (dependencies) | `terraform.tfstate` | Every `terraform apply` |
+| **Governance** | Denied actions, compliance frameworks, mandatory tags | Static config | Manual |
+| **Dynamic State** | Active alarms, CloudWatch metrics, agent locks | CloudWatch (real-time) | At incident time |
+| **Precedents** | History of every remediation + outcome + Titan embedding | Lambda HITL (post-execution) | After each approved fix |
+| **Constraints** | Maintenance windows, forbidden ops by schedule | Static config | Manual |
+
+**Why this matters:** when Bedrock proposes a fix, it sees the exact network topology, knows which actions are governance-blocked, and retrieves semantically similar past incidents via RAG. Impossible or dangerous proposals are structurally prevented, not prompt-engineered away.
 
 ---
 
-## The Digital Twin Context Map
+## Semantic RAG on Precedents (Phase 8)
 
-The core innovation. Not a list of resources — a **living Knowledge Graph** with 5 layers:
+After each approved and executed fix, the Lambda HITL Executor registers a precedent with a vector embedding:
 
-| Layer | What it contains | Source |
-|-------|-----------------|--------|
-| **Topology** | Nodes (resources) + edges (dependencies) | Parsed from `terraform.tfstate` |
-| **Governance** | Denied actions, compliance frameworks, mandatory tags | Static config (SOC2 / HIPAA rules) |
-| **Dynamic State** | Active alarms, CloudWatch metrics, agent locks | MCP Server queries CloudWatch in real-time at incident time |
-| **Precedents** | History of every remediation + outcome + confidence | Written by MCP Server after each action |
-| **Constraints** | Maintenance windows, forbidden ops by schedule | Static config |
+```
+incident query → Titan Embeddings (amazon.titan-embed-text-v1, 1536 dims)
+                       ↓
+              cosine similarity against all stored precedents
+                       ↓
+              top-k most similar past incidents injected into Bedrock context
+```
 
-**Why this eliminates hallucination:** the agent validates every hypothesis against the graph structure.
-If Claude thinks the issue is the database, the graph immediately shows the RDS instance is in an isolated subnet with a specific SG — no impossible network commands get proposed.
+Validated: `similarity_score=0.8484` on same-type incident replay. The system gets smarter with every resolved incident without retraining.
 
 ---
 
@@ -113,18 +133,17 @@ If Claude thinks the issue is the database, the graph immediately shows the RDS 
 
 | Layer | Technology |
 |-------|------------|
-| IaC | Terraform >= 1.5 — modular, S3 remote backend |
-| Graph Store (MVP) | S3 — JSON-LD with KMS encryption + versioning |
-| Graph Store (Prod) | Amazon Neptune — native multi-hop traversal |
-| Topology Source | `terraform.tfstate` — auto-updated on every apply |
-| Agent Compute | ECS Fargate — no nodes, scales to zero |
-| AI Brain | Amazon Bedrock (Claude Sonnet) |
+| IaC | Terraform >= 1.5, S3 remote backend |
+| Graph Store | S3 — JSON-LD, KMS encryption + versioning |
+| AI Reasoning | Amazon Bedrock — `us.anthropic.claude-sonnet-4-6` (cross-region inference) |
+| RAG | Amazon Titan Embeddings v1 (1536 dims) + cosine similarity (Python) |
 | AI Transport | VPC Interface Endpoint — Bedrock never touches internet |
-| Agent Framework | MCP (Model Context Protocol) — FastMCP / Python |
-| Context Collector | AWS Lambda — parses tfstate + CloudWatch |
+| Agent Compute | ECS Fargate — serverless containers, scales to zero |
+| HTTP Framework | FastAPI — async incident handler |
+| HITL Gateway | SNS email + API Gateway + Lambda executor |
+| Topology Source | `terraform.tfstate` auto-parsed on every apply |
 | Event Trigger | CloudWatch Alarms + EventBridge |
-| HITL Gateway | Slack (inline approve/reject buttons) |
-| Audit | CloudTrail — S3 WORM bucket + KMS |
+| Audit | CloudTrail — S3 WORM + KMS |
 | IAM | Least-privilege — no IAM write, no billing, no root |
 
 ---
@@ -134,164 +153,245 @@ If Claude thinks the issue is the database, the graph immediately shows the RDS 
 ```
 sao-platform/
 ├── mcp-server/
-│   ├── server.py                  # MCP Server — 4 tools
+│   ├── app.py                     # FastAPI HTTP server — incident handler, Bedrock, HITL flow
+│   ├── server.py                  # MCP server — 4 tools (sao_load_context, etc.)
 │   ├── config.py                  # Environment-based config
 │   ├── context_map/
 │   │   ├── schema.py              # DigitalTwin + all layer models (Pydantic)
 │   │   ├── store.py               # S3 read/write for the graph
-│   │   └── query.py               # Multi-hop traversal + context builder
+│   └── └── query.py               # Topology traversal + semantic precedent retrieval
 │   └── resources/
 │       ├── base.py                # ResourcePlugin interface
 │       ├── lambda_.py             # LambdaPlugin — timeout / memory / concurrency
 │       └── ecs.py                 # ECSPlugin — scale / force-deploy
 ├── lambda-collector/
-│   ├── handler.py                 # Lambda entry point — triggers on S3 event (new tfstate)
+│   ├── handler.py                 # Lambda entry point — fires on S3 event (new tfstate)
 │   └── collectors/
 │       ├── tfstate.py             # Parses tfstate → nodes + edges
 │       └── cloudwatch.py         # Fetches metrics + active alarms
+├── lambda-hitl/
+│   └── handler.py                 # HITL executor — approve/reject, boto3, precedent registration
 ├── terraform/
-│   ├── versions.tf                # Provider + backend (via -backend-config)
+│   ├── versions.tf                # Provider + remote backend
 │   ├── variables.tf               # All inputs (no hardcoded values)
-│   ├── main.tf                    # S3 graph store + Lambda Collector + EventBridge
+│   ├── main.tf                    # S3 + Lambda Collector + EventBridge
+│   ├── ecs.tf                     # ECS Fargate cluster + task definition + ALB
+│   ├── hitl.tf                    # API Gateway + Lambda HITL
+│   ├── iam.tf                     # IAM roles + least-privilege policies
+│   ├── networking.tf              # VPC + subnets + security groups
+│   ├── vpc_endpoints.tf           # 8 VPC Interface endpoints (Bedrock, ECR, S3, etc.)
+│   ├── alarms.tf                  # CloudWatch alarms + EventBridge rules
+│   ├── ecr.tf                     # ECR repository
 │   ├── outputs.tf
 │   ├── backend.tfbackend.example  # Copy → backend.tfbackend (gitignored)
 │   └── terraform.tfvars.example   # Copy → terraform.tfvars (gitignored)
 └── docs/
-    └── digital_twin_schema.json   # Full Digital Twin schema — Fase 1
+    ├── digital_twin_schema.json   # Full Digital Twin schema reference
+    └── extending-digital-twin.md  # Guide: adding new AWS resource types
 ```
 
 ---
 
-## MCP Server Tools
+## MCP Tools
 
-| Tool | Description | Requires HITL |
-|------|-------------|---------------|
-| `sao_load_context` | Loads full Digital Twin context for an incident | No |
-| `sao_validate_action` | Checks governance before executing any action | No |
-| `sao_execute_action` | Executes approved action via resource plugin | Yes (MEDIUM / HIGH risk) |
-| `sao_graph_status` | Current Digital Twin summary | No |
-
----
-
-## Resource Plugins
-
-Adding support for a new AWS service = one new file in `mcp-server/resources/`.
-
-| Plugin | Actions | Risk |
-|--------|---------|------|
-| `LambdaPlugin` | update_timeout, update_memory, update_concurrency | LOW / MEDIUM |
-| `ECSPlugin` | scale_desired, force_new_deployment, stop_service | LOW / MEDIUM / HIGH |
-| `RDSPlugin` *(Fase 4)* | resize, parameter_group, snapshot_restore | HIGH |
-| `EC2Plugin` *(Fase 4)* | reboot, resize, AMI rollback | HIGH |
-| `EKSPlugin` *(Fase 4)* | scale_deployment, restart_pod, cordon_node | MEDIUM / HIGH |
+| Tool | Description |
+|------|-------------|
+| `sao_load_context` | Loads full Digital Twin context for an incident node |
+| `sao_validate_action` | Checks governance + node lock before executing any action |
+| `sao_execute_action` | Executes approved action via resource plugin, writes precedent |
+| `sao_graph_status` | Current Digital Twin summary (nodes, edges, locks, precedent count) |
 
 ---
 
-## Security Layers
+## HTTP Endpoints
 
-```
-Layer 1 — Network:      Zero-egress VPC, Bedrock via PrivateLink — no NAT, no IGW
-Layer 2 — IAM:          Least privilege — no IAM write, no billing, no root access
-Layer 3 — Governance:   Denied actions in graph — agent cannot override policy
-Layer 4 — HITL:         MEDIUM + HIGH risk → human approval required before execution
-Layer 5 — Audit:        CloudTrail WORM — immutable, every action tied to task_id
-Layer 6 — Agent Locks:  Graph locks node during execution — no concurrent agents on same resource
-Layer 7 — Secrets:      All credentials via SSM Parameter Store — never in code or tfvars
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check |
+| `POST` | `/incident` | Main incident handler — full Bedrock + HITL flow |
+| `GET` | `/debug/context/{node_id}` | Digital Twin context for a node (no Bedrock call) |
+| `POST` | `/debug/prompt` | Full prompt that would be sent to Bedrock (no Bedrock call) |
 
 ---
 
-## Risk Policy — HITL Routing
+## HITL Actions
+
+All actions executed by the Lambda HITL Executor after operator approval:
+
+| Action | Parameters | AWS Call |
+|--------|------------|----------|
+| `lambda_update_timeout` | `function_name`, `timeout` | `update_function_configuration` |
+| `lambda_update_memory` | `function_name`, `memory_size` | `update_function_configuration` |
+| `lambda_update_reserved_concurrency` | `function_name`, `reserved_concurrent_executions` | `put_function_concurrency` |
+| `ecs_restart_service` | `cluster`, `service` | `update_service(forceNewDeployment=True)` |
+| `ecs_update_desired_count` | `cluster`, `service`, `desired_count` | `update_service` |
+| `rds_reboot_instance` | `db_instance_identifier` | `reboot_db_instance` |
+| `none` | `reason` | No action — log only |
+
+---
+
+## Risk Policy
 
 | Risk Level | Examples | Approval |
-|------------|---------|---------|
-| `LOW` | Lambda timeout/memory update, ECS scale up | Auto-approved |
+|------------|----------|---------|
+| `LOW` | Lambda timeout/memory update | Auto-approved |
 | `MEDIUM` | ECS force-new-deployment, Lambda concurrency | On-call engineer |
-| `HIGH` | RDS resize, EKS cordon, stop_service | Manager approval |
+| `HIGH` | RDS operations, service stop | Manager approval |
 
 ---
 
-## Estimated Cost per Incident (Claude Sonnet on Bedrock)
+## Security
+
+```
+Layer 1 — Network:      Zero-egress VPC, Bedrock + ECR via PrivateLink — no NAT, no IGW
+Layer 2 — IAM:          Least privilege — no IAM write, no billing, no root access
+Layer 3 — Governance:   Denied actions in Digital Twin — agent cannot override policy
+Layer 4 — HITL:         MEDIUM + HIGH risk → human approval required before execution
+Layer 5 — Audit:        CloudTrail WORM — immutable, every action tied to proposal token
+Layer 6 — Agent Locks:  Digital Twin locks node during execution — no concurrent agents
+Layer 7 — Secrets:      Credentials via SSM Parameter Store — never in code or tfvars
+Layer 8 — Idempotency:  Proposals have status (pending/executed/rejected/failed) — one-time execution
+```
+
+---
+
+## AWS Resources (Deployed MVP)
+
+| Resource | Name |
+|----------|------|
+| S3 (graph + proposals) | `<account-id>-sao-graph-<account-id>` (set in `terraform.tfvars`) |
+| Lambda Collector | `sao-lambda-collector` |
+| Lambda Dispatcher | `sao-alarm-dispatcher` |
+| Lambda HITL | `sao-lambda-hitl` |
+| API Gateway | `https://<api-id>.execute-api.<region>.amazonaws.com` |
+| EventBridge Rule | `sao-cw-alarm-trigger` |
+| ECS Cluster | `sao-platform-cluster` |
+| ECS Service | `sao-platform-service` |
+| ALB | `sao-platform-alb-<id>.<region>.elb.amazonaws.com` |
+| ECR | `<account-id>.dkr.ecr.<region>.amazonaws.com/sao-mcp-server` |
+| SNS Topic | `sao-platform-alarms` (KMS encrypted) |
+| VPC Endpoints | 8 Interface endpoints + S3 Gateway |
+
+---
+
+## Estimated Cost per Incident
 
 | Component | Tokens | Cost |
 |-----------|--------|------|
-| Digital Twin context (static, cached) | ~22,000 | ~$0.007 (cache read) |
-| Dynamic state + alarm context | ~11,000 | ~$0.033 |
-| Claude response (proposed fix) | ~3,500 | ~$0.053 |
+| Digital Twin context (static, prompt cache eligible) | ~22,000 | ~$0.007 |
+| Dynamic state + CloudWatch context | ~11,000 | ~$0.033 |
+| Claude Sonnet response | ~3,500 | ~$0.053 |
 | **Total per incident** | **~36,500** | **~$0.093** |
+
+Infrastructure (ECS Fargate + VPC Endpoints): ~$0.19/hr — **tear down when not in demo**.
 
 50 incidents/month ≈ **$4.65 in AI tokens**.
 
 ---
 
-## Roadmap
+## Development Operations
 
-| Phase | Description | Status |
-|-------|-------------|--------|
-| Fase 0 | Scaffold — MCP Server, Lambda Collector, Terraform skeleton, Digital Twin schema | **Complete** |
-| Fase 1 | IAM roles + S3 graph store deploy + Lambda Collector live | Pending |
-| Fase 2 | MCP Server on ECS + Bedrock PrivateLink integration | Pending |
-| Fase 3 | HITL Gateway — Slack approve/reject buttons | Pending |
-| Fase 4 | Additional plugins: RDS, EC2, EKS | Pending |
-| Fase 5 | RAG over precedents + Neptune migration | Pending |
-| Fase 6 | Multi-tenant + dashboard + SaaS model | Pending |
+```bash
+# Build and deploy MCP Server image
+make docker-deploy
+
+# Rebuild Lambda Collector ZIP
+make build-collector
+
+# Fix ECS service pointing to wrong task definition (run after terraform apply)
+make fix-taskdef
+
+# Trigger a test alarm (OK → ALARM)
+make run_script
+
+# View proposals in S3
+make list-proposals
+make show-proposal TOKEN=<uuid>
+
+# View logs
+make logs-dispatcher
+make logs-mcp
+
+# Validate RAG mode and precedents
+make debug-rag
+```
 
 ---
 
-## Relation to aws-sovereign-ops
+## Deploying from Scratch
 
-[aws-sovereign-ops](https://github.com/kratosvil/aws-sovereign-ops) is the v1 demo that validated the concept (4/4 Lambda e2e scenarios passed). SAO Platform is the architectural evolution — the Digital Twin Context Map replaces manual context collection and enables zero-hallucination reasoning at scale.
-
----
-
-## Prerequisites
+### Prerequisites
 
 | Tool | Version |
 |------|---------|
 | Python | >= 3.12 |
 | Terraform | >= 1.5 |
 | AWS CLI v2 | latest |
-| Amazon Bedrock | Claude Sonnet model access enabled |
+| Docker | latest |
+| Amazon Bedrock | Claude Sonnet + Titan Embeddings access enabled |
 
----
-
-## Quick Start
+### Steps
 
 ```bash
 git clone https://github.com/kratosvil/sao-platform.git
 cd sao-platform
 
-# Install dependencies
-make install
-
-# Configure backend (copy and fill in your values)
+# 1. Configure backend and variables
 cp terraform/backend.tfbackend.example terraform/backend.tfbackend
-cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+cp terraform/terraform.tfvars.example  terraform/terraform.tfvars
+# Fill in both files with your AWS account values
 
-# Set required environment variables
-export TFSTATE_BUCKET=your-tfstate-bucket
-export GRAPH_BUCKET=your-graph-bucket
-export AWS_REGION=us-east-1
-
-# Deploy infrastructure (Fase 1+)
+# 2. Deploy infrastructure
 cd terraform
 terraform init -backend-config=backend.tfbackend
 terraform apply -var-file=terraform.tfvars
+cd ..
 
-# Start MCP Server locally
-make run-mcp
+# 3. Build and push MCP Server image
+make docker-deploy
+
+# 4. Point ECS service to the latest task definition
+make fix-taskdef
+
+# 5. Build and upload Lambda Collector
+make build-collector
+aws lambda update-function-code \
+  --function-name sao-lambda-collector \
+  --zip-file fileb://lambda-collector/collector.zip \
+  --region us-east-1
+
+# 6. Trigger the collector to build the initial Digital Twin
+aws lambda invoke \
+  --function-name sao-lambda-collector \
+  --payload '{"source":"manual"}' \
+  --region us-east-1 /tmp/out.json && cat /tmp/out.json
+
+# 7. Test the full incident flow
+make run_script
 ```
+
+### Critical Notes
+
+- Bedrock model **must** use cross-region inference profile: `us.anthropic.claude-sonnet-4-6` — the plain `anthropic.claude-sonnet-4-6` returns `ValidationException: on-demand throughput not supported`.
+- ECS task definition has `ignore_changes = [task_definition]` in the module — always run `make fix-taskdef` after any `terraform apply` that changes env vars.
+- After a HITL-approved fix changes a resource (e.g., Lambda memory), update the corresponding value in `terraform.tfvars` and `main.tf` to prevent IaC drift on the next apply.
 
 ---
 
 ## Target Use Cases
 
-| Industry | Compliance | Use Case |
-|----------|------------|---------|
-| Fintech | SOC2 / PCI-DSS | Autonomous incident response — data never leaves regulated perimeter |
+| Industry | Compliance | Value |
+|----------|------------|-------|
+| Fintech | SOC2 / PCI-DSS | Incident response — data never leaves the regulated perimeter |
 | Healthtech | HIPAA | AI-assisted ops where PHI workloads cannot use public AI endpoints |
 | Government | FedRAMP | Sovereign AI operations inside isolated cloud enclaves |
-| SaaS B2B | SOC2 | Platform reliability — reduce MTTR without manual on-call toil |
+| SaaS B2B | SOC2 | Reduce MTTR without manual on-call toil |
+
+---
+
+## Relation to aws-sovereign-ops
+
+[aws-sovereign-ops](https://github.com/kratosvil/aws-sovereign-ops) is the v1 proof-of-concept that validated the Lambda remediation flow (4/4 e2e scenarios passed). SAO Platform is the full architectural evolution: the Digital Twin Context Map replaces manual context injection and enables structured, auditable, zero-hallucination reasoning at scale.
 
 ---
 
@@ -299,7 +399,6 @@ make run-mcp
 
 [Business Source License 1.1](LICENSE)
 
-Free for internal and non-commercial use.
-Commercial use requires a license — contact: kratosvill@gmail.com
-
-After 2030-01-01 this project converts to Apache License 2.0.
+Free for internal and non-commercial use.  
+Commercial use requires a license — contact: kratosvill@gmail.com  
+Converts to Apache License 2.0 on 2030-01-01.

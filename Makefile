@@ -1,5 +1,8 @@
-ECR_URL = 805778285334.dkr.ecr.us-east-1.amazonaws.com/sao-mcp-server
-AWS_REGION = us-east-1
+AWS_REGION  ?= us-east-1
+AWS_ACCOUNT ?= $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
+GRAPH_BUCKET ?= $(AWS_ACCOUNT)-sao-graph-$(AWS_ACCOUNT)
+ECR_URL      = $(AWS_ACCOUNT).dkr.ecr.$(AWS_REGION).amazonaws.com/sao-mcp-server
+ALB_URL      ?= $(shell cd terraform && terraform output -raw alb_dns_name 2>/dev/null || echo "localhost:8000")
 
 .PHONY: install dev test lint run-mcp build-collector build-hitl docker-build docker-push docker-deploy collector-local clean
 
@@ -63,11 +66,11 @@ collector-local:
 
 # Listar todas las propuestas HITL guardadas en S3
 list-proposals:
-	aws s3 ls s3://kratosvil-sao-graph-805778285334/proposals/ --region $(AWS_REGION)
+	aws s3 ls s3://$(GRAPH_BUCKET)/proposals/ --region $(AWS_REGION)
 
 # Ver detalle de una propuesta: make show-proposal TOKEN=<uuid>
 show-proposal:
-	aws s3 cp s3://kratosvil-sao-graph-805778285334/proposals/$(TOKEN).json - --region $(AWS_REGION)
+	aws s3 cp s3://$(GRAPH_BUCKET)/proposals/$(TOKEN).json - --region $(AWS_REGION)
 
 # Logs recientes del Lambda dispatcher
 logs-dispatcher:
@@ -90,7 +93,7 @@ run_script:
 
 # Verificar RAG mode y precedentes con similarity_score via debug/prompt
 debug-rag:
-	curl -s -X POST "http://sao-platform-alb-1215178185.us-east-1.elb.amazonaws.com/debug/prompt" \
+	curl -s -X POST "http://$(ALB_URL)/debug/prompt" \
 		-H "Content-Type: application/json" \
 		-d '{"alarm_name":"sao-collector-errors","node_id":"sao-lambda-collector","resource_type":"AWS::Lambda::Function"}' \
 		| python3 -c "import json,sys;d=json.load(sys.stdin);print('RAG mode:',d.get('rag_mode'));ps=d.get('graph_context',{}).get('similar_precedents',[]);print('Precedentes:',len(ps));[print(json.dumps({k:v for k,v in p.items() if k!='embedding'},indent=2)) for p in ps]"
