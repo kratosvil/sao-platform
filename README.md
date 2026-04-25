@@ -2,6 +2,8 @@
 
 Autonomous AWS incident response platform. A CloudWatch alarm fires, an AI agent reasons over a full infrastructure knowledge graph, proposes an exact fix, and executes it — only after a human approves via email. All AI inference stays inside your VPC via PrivateLink.
 
+![SAO Platform — Sovereign Agentic Operations](images/banner.png)
+
 > **MVP Status:** End-to-end validated through Phase 8. Production-grade incident flow: detection → Bedrock reasoning → HITL email → boto3 execution → precedent registered in Digital Twin. Fully deployed on AWS.
 
 ---
