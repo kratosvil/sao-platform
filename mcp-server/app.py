@@ -211,7 +211,9 @@ def debug_prompt(event: AlarmEvent):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Digital Twin error: {e}")
     query = GraphQuery(twin)
-    graph_context = query.context_for_agent(event.alarm_name, event.node_id)
+    query_text = f"alarm:{event.alarm_name} node:{event.node_id} type:{event.resource_type}"
+    query_embedding = _compute_embedding(query_text)
+    graph_context = query.context_for_agent(event.alarm_name, event.node_id, query_embedding)
     cw_context = _get_cloudwatch_context(event.alarm_name, event.node_id, event.region)
     prompt = _build_prompt(event, graph_context, cw_context)
     return {
@@ -219,6 +221,7 @@ def debug_prompt(event: AlarmEvent):
         "max_tokens": BEDROCK_MAX_TOKENS,
         "prompt_chars": len(prompt),
         "prompt_tokens_estimate": len(prompt) // 4,
+        "rag_mode": "semantic" if query_embedding else "fallback",
         "graph_context": graph_context,
         "cloudwatch_context": cw_context,
         "full_prompt": prompt,

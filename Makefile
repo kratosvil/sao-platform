@@ -88,6 +88,13 @@ run_script:
 	@echo "Ejecutando _script.sh..."
 	bash _script.sh
 
+# Verificar RAG mode y precedentes con similarity_score via debug/prompt
+debug-rag:
+	curl -s -X POST "http://sao-platform-alb-1215178185.us-east-1.elb.amazonaws.com/debug/prompt" \
+		-H "Content-Type: application/json" \
+		-d '{"alarm_name":"sao-collector-errors","node_id":"sao-lambda-collector","resource_type":"AWS::Lambda::Function"}' \
+		| python3 -c "import json,sys;d=json.load(sys.stdin);print('RAG mode:',d.get('rag_mode'));ps=d.get('graph_context',{}).get('similar_precedents',[]);print('Precedentes:',len(ps));[print(json.dumps({k:v for k,v in p.items() if k!='embedding'},indent=2)) for p in ps]"
+
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true
 	find . -name "*.pyc" -delete 2>/dev/null; true
