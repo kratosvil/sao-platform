@@ -13,6 +13,8 @@ __pycache__/
 # Terraform state and cache
 *.tfstate
 *.tfstate.backup
+*.tfplan
+tfplan
 .terraform/
 .terraform.lock.hcl
 

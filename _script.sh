@@ -1,27 +1,22 @@
-#!/bin/bash
-# Fase 8 test RAG: falla real NoSuchKey → Bedrock recibe precedente con similarity_score
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-REGION="us-east-1"
-ALARM="sao-collector-errors"
-LAMBDA="sao-lambda-collector"
+# Módulo 1 (SAGA): carga el mismo PAT de saga-gitops-manifests en Secrets
+# Manager para que el Lambda HITL lo use en argocd_rollback_via_git.
+# El token nunca se imprime ni queda en ningún archivo de este repo.
 
-echo "==> Reseteando alarma a OK..."
-aws cloudwatch set-alarm-state \
-  --alarm-name "$ALARM" \
-  --state-value OK \
-  --state-reason "Reset pre-test RAG" \
-  --region "$REGION"
-
-echo "==> Invocando $LAMBDA con tfstate inexistente (error real)..."
-aws lambda invoke \
-  --function-name "$LAMBDA" \
-  --payload '{"key": "fase8/nonexistent.tfstate"}' \
-  --cli-binary-format raw-in-base64-out \
-  --region "$REGION" \
-  /tmp/sao-lambda-response.json
-
-cat /tmp/sao-lambda-response.json
+read -rsp "Pegá el mismo PAT de saga-gitops-manifests (Contents+PRs Read&Write): " TOKEN
 echo ""
-echo "==> Lambda errored. Esperando ~60s para que CloudWatch evalúe..."
-echo "    watch -n 10 'aws cloudwatch describe-alarms --alarm-names $ALARM --region $REGION --query MetricAlarms[0].StateValue --output text'"
+
+if [ -z "$TOKEN" ]; then
+  echo "Token vacío, cancelado."
+  exit 1
+fi
+
+aws secretsmanager put-secret-value \
+  --secret-id saga/gitops-manifests-token \
+  --secret-string "$TOKEN" \
+  --region us-east-1 > /dev/null
+
+unset TOKEN
+echo "Listo — token cargado en Secrets Manager (saga/gitops-manifests-token)."
