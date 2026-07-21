@@ -126,7 +126,10 @@ def _github_request(method: str, path: str, token: str, body: dict = None) -> di
 
 def _get_gitops_token() -> str:
     resp = secretsmanager.get_secret_value(SecretId=GITOPS_TOKEN_SECRET)
-    return resp["SecretString"]
+    # .strip(): un \n colado al cargar el secret (paste/echo) rompe el
+    # header Authorization silenciosamente -- GitHub devuelve 401 genérico,
+    # nada indica que sea un problema de whitespace.
+    return resp["SecretString"].strip()
 
 
 def _argocd_rollback_via_git(params: dict) -> str:
