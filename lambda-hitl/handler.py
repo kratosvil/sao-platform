@@ -5,6 +5,9 @@ actualiza el estado en S3 y notifica por SNS.
 """
 import json
 import os
+import uuid
+import urllib.request
+import urllib.error
 import boto3
 from datetime import datetime, timezone
 
@@ -12,10 +15,13 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 GRAPH_BUCKET = os.getenv("GRAPH_BUCKET", "")
 GRAPH_KEY = os.getenv("GRAPH_KEY", "sao/digital_twin.json")
 SNS_TOPIC = os.getenv("HITL_SNS_TOPIC", "")
+GITOPS_TOKEN_SECRET = os.getenv("GITOPS_TOKEN_SECRET", "")
+GITOPS_MANIFESTS_REPO = os.getenv("GITOPS_MANIFESTS_REPO", "")
 PROPOSALS_PREFIX = "proposals/"
 
 s3 = boto3.client("s3", region_name=AWS_REGION)
 sns_client = boto3.client("sns", region_name=AWS_REGION)
+secretsmanager = boto3.client("secretsmanager", region_name=AWS_REGION)
 
 
 def _load_proposal(token: str) -> dict:
@@ -98,6 +104,89 @@ def _register_precedent(proposal: dict, execution_result: str, resolved_at: str)
         print(f"Could not save Digital Twin with precedent: {e}")
 
 
+def _github_request(method: str, path: str, token: str, body: dict = None) -> dict:
+    req = urllib.request.Request(
+        f"https://api.github.com{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+        },
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()
+        raise RuntimeError(f"GitHub API {method} {path} -> {e.code}: {detail}")
+
+
+def _get_gitops_token() -> str:
+    resp = secretsmanager.get_secret_value(SecretId=GITOPS_TOKEN_SECRET)
+    return resp["SecretString"]
+
+
+def _argocd_rollback_via_git(params: dict) -> str:
+    """
+    Revierte un archivo del repo de manifiestos (saga-gitops-manifests) a
+    una revision anterior conocida-buena, via un PR nuevo. El agente NUNCA
+    commitea directo a `main` -- esa es la rama que ArgoCD observa. El PR
+    queda sujeto a los checks de CI (dry-run/OPA + Semgrep/Trivy/Gitleaks,
+    Modulos 1/24) y requiere aprobacion humana explicita antes de mergear
+    (decision de diseno SV-AOP-012: sin auto-merge, ver estado.md Modulo 1).
+    """
+    path = params["path"]
+    revert_to = params["revert_to"]
+    repo = GITOPS_MANIFESTS_REPO
+    token = _get_gitops_token()
+
+    # 1. Contenido del archivo tal como estaba en la revision buena
+    old_file = _github_request("GET", f"/repos/{repo}/contents/{path}?ref={revert_to}", token)
+    old_content_b64 = old_file["content"]
+
+    # 2. SHA del ultimo commit en main
+    main_ref = _github_request("GET", f"/repos/{repo}/git/ref/heads/main", token)
+    main_sha = main_ref["object"]["sha"]
+
+    # 3. Rama nueva desde main -- nunca se escribe en main directo
+    branch = f"saga-rollback-{uuid.uuid4().hex[:10]}"
+    _github_request("POST", f"/repos/{repo}/git/refs", token, {
+        "ref": f"refs/heads/{branch}",
+        "sha": main_sha,
+    })
+
+    # 4. SHA actual del archivo en la rama nueva (la API lo exige para poder actualizarlo)
+    current_file = _github_request("GET", f"/repos/{repo}/contents/{path}?ref={branch}", token)
+    current_sha = current_file["sha"]
+
+    # 5. Commit del revert en la rama nueva, no en main
+    _github_request("PUT", f"/repos/{repo}/contents/{path}", token, {
+        "message": f"saga: revert {path} to {revert_to[:12]}",
+        "content": old_content_b64,
+        "sha": current_sha,
+        "branch": branch,
+    })
+
+    # 6. PR contra main -- el merge queda sujeto a CI + revision humana, nunca automatico
+    pr = _github_request("POST", f"/repos/{repo}/pulls", token, {
+        "title": f"SAGA: revert {path} to {revert_to[:12]}",
+        "head": branch,
+        "base": "main",
+        "body": (
+            f"Fix propuesto automaticamente por SAGA.\n\n"
+            f"- Archivo: `{path}`\n"
+            f"- Revertido a: `{revert_to}`\n\n"
+            f"Requiere aprobacion humana explicita -- este PR no se auto-mergea "
+            f"(decision de diseno SV-AOP-012, ver estado.md Modulo 1)."
+        ),
+    })
+
+    return f"PR abierto: {pr['html_url']} (rama {branch}) -- pendiente de revision humana, no se mergeo solo"
+
+
 def _execute_action(action: str, params: dict) -> str:
     """Ejecuta la acción boto3 predefinida. Retorna descripción de lo ejecutado."""
     lm = boto3.client("lambda", region_name=AWS_REGION)
@@ -139,6 +228,9 @@ def _execute_action(action: str, params: dict) -> str:
         identifier = params["db_instance_identifier"]
         rds.reboot_db_instance(DBInstanceIdentifier=identifier)
         return f"RDS {identifier}: reboot iniciado"
+
+    if action == "argocd_rollback_via_git":
+        return _argocd_rollback_via_git(params)
 
     if action == "none":
         reason = params.get("reason", "No automated action available")

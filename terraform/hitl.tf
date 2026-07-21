@@ -91,9 +91,11 @@ resource "aws_lambda_function" "hitl" {
 
   environment {
     variables = {
-      GRAPH_BUCKET   = aws_s3_bucket.graph_store.bucket
-      GRAPH_KEY      = "sao/digital_twin.json"
-      HITL_SNS_TOPIC = aws_sns_topic.alarms.arn
+      GRAPH_BUCKET          = aws_s3_bucket.graph_store.bucket
+      GRAPH_KEY             = "sao/digital_twin.json"
+      HITL_SNS_TOPIC        = aws_sns_topic.alarms.arn
+      GITOPS_TOKEN_SECRET   = aws_secretsmanager_secret.gitops_manifests_token.name
+      GITOPS_MANIFESTS_REPO = "kratosvil/saga-gitops-manifests"
     }
   }
 
