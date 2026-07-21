@@ -89,22 +89,17 @@ resource "aws_iam_role_policy" "mcp_server" {
         Resource = "*"
       },
       {
-        Sid    = "ExecuteLambda"
-        Effect = "Allow"
-        Action = [
-          "lambda:UpdateFunctionConfiguration",
-          "lambda:GetFunctionConfiguration",
-          "lambda:InvokeFunction",
-        ]
+        # Módulo 2 (SAGA): solo lectura de estado -- la escritura ya no es posible
+        # via boto3 directo, la única vía es el PR de GitHub del Módulo 1.
+        Sid      = "ReadLambda"
+        Effect   = "Allow"
+        Action   = ["lambda:GetFunctionConfiguration"]
         Resource = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:*"
       },
       {
-        Sid    = "ExecuteECS"
-        Effect = "Allow"
-        Action = [
-          "ecs:UpdateService",
-          "ecs:DescribeServices",
-        ]
+        Sid      = "ReadECS"
+        Effect   = "Allow"
+        Action   = ["ecs:DescribeServices"]
         Resource = "*"
       },
       {

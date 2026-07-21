@@ -54,28 +54,15 @@ resource "aws_iam_role_policy" "hitl" {
         Action = ["sns:Publish"]
         Resource = aws_sns_topic.alarms.arn
       },
-      {
-        Sid    = "ExecuteLambda"
-        Effect = "Allow"
-        Action = [
-          "lambda:UpdateFunctionConfiguration",
-          "lambda:GetFunctionConfiguration",
-          "lambda:PutFunctionConcurrency",
-        ]
-        Resource = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:*"
-      },
-      {
-        Sid    = "ExecuteECS"
-        Effect = "Allow"
-        Action = ["ecs:UpdateService", "ecs:DescribeServices"]
-        Resource = "*"
-      },
-      {
-        Sid    = "ExecuteRDS"
-        Effect = "Allow"
-        Action = ["rds:RebootDBInstance"]
-        Resource = "arn:aws:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:db:*"
-      },
+      # Módulo 2 (SAGA): se eliminaron los Sid ExecuteLambda/ExecuteECS/ExecuteRDS
+      # (lambda:UpdateFunctionConfiguration, ecs:UpdateService, rds:RebootDBInstance,
+      # etc.) -- eran 100% escritura directa AWS, sin lectura legítima asociada
+      # (handler.py no hace ningún describe/get con esos clientes). El HITL ya
+      # no puede ejecutar remediación directa; la única vía de escritura es el
+      # PR de GitHub de argocd_rollback_via_git (Módulo 1). Las funciones legacy
+      # (_execute_action: lambda_update_*, ecs_restart_service, rds_reboot_instance)
+      # quedan en el código a propósito -- fallan con AccessDenied, es la evidencia
+      # del test negativo de este módulo.
     ]
   })
 }
