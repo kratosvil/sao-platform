@@ -41,6 +41,12 @@ variable "tfstate_kms_key_arn" {
   description = "ARN de la KMS key usada para cifrar el tfstate bucket. Requerido si el bucket usa SSE-KMS."
 }
 
+variable "prometheus_url" {
+  type        = string
+  description = "URL base de Prometheus, expuesto en el ALB compartido de argocd-gitops-aws (SV-ARG-011) -- usado por lambda-hitl-poller para verificar cierre de loop (Modulo 4). Vacio deshabilita la verificacion."
+  default     = ""
+}
+
 # --- Networking ---
 
 variable "vpc_cidr" {

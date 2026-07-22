@@ -4,6 +4,9 @@
 # eligio polling en vez de webhook para no depender de otra feature de GitHub
 # que pueda estar restringida por tier (ya paso con branch protection en el
 # repo privado, Modulo 1).
+# Modulo 4: el mismo poller tambien revisa pending_merge (PRs de escalate
+# esperando un click humano en GitHub) y pending_loop_closure (confirmar en
+# Prometheus que la alerta se resolvio antes de generar un guardrail).
 data "archive_file" "hitl_poller" {
   type        = "zip"
   source_file = "${path.module}/../lambda-hitl-poller/handler.py"
@@ -53,6 +56,14 @@ resource "aws_iam_role_policy" "hitl_poller" {
         Resource = "arn:aws:s3:::${var.graph_bucket_name}/proposals/*"
       },
       {
+        # Modulo 4: registrar el precedente en el Digital Twin al confirmar
+        # el cierre de loop (mismo path que usa lambda-hitl para el mismo fin).
+        Sid      = "ReadWriteDigitalTwin"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
+        Resource = "arn:aws:s3:::${var.graph_bucket_name}/sao/digital_twin.json"
+      },
+      {
         Sid      = "ReadGitOpsToken"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
@@ -79,11 +90,14 @@ resource "aws_lambda_function" "hitl_poller" {
 
   environment {
     variables = {
-      GRAPH_BUCKET          = aws_s3_bucket.graph_store.bucket
-      HITL_SNS_TOPIC        = aws_sns_topic.alarms.arn
-      GITOPS_TOKEN_SECRET   = aws_secretsmanager_secret.gitops_manifests_token.name
-      GITOPS_MANIFESTS_REPO = "kratosvil/saga-gitops-manifests"
-      CI_TIMEOUT_MINUTES    = "15"
+      GRAPH_BUCKET                 = aws_s3_bucket.graph_store.bucket
+      GRAPH_KEY                    = "sao/digital_twin.json"
+      HITL_SNS_TOPIC               = aws_sns_topic.alarms.arn
+      GITOPS_TOKEN_SECRET          = aws_secretsmanager_secret.gitops_manifests_token.name
+      GITOPS_MANIFESTS_REPO        = "kratosvil/saga-gitops-manifests"
+      CI_TIMEOUT_MINUTES           = "15"
+      PROMETHEUS_URL               = var.prometheus_url
+      LOOP_CLOSURE_TIMEOUT_MINUTES = "10"
     }
   }
 

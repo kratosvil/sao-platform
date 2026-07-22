@@ -46,6 +46,11 @@ operator_email = "oncall@mycompany.com"
 # The parameter must exist in SSM before deploy if ECS reads it at startup.
 slack_webhook_ssm_param = "/sao/slack/webhook_url"
 
+# Base URL of Prometheus (from SV-ARG-011's shared ALB, e.g. "http://<alb-hostname>/prometheus").
+# Used by lambda-hitl-poller to confirm the original alert actually cleared before
+# generating a guardrail policy (SV-AOP-012 Modulo 4). Leave empty to disable that check.
+prometheus_url = "http://your-alb-hostname/prometheus"
+
 # ---------------------------------------------------------------------------
 # Bedrock
 # ---------------------------------------------------------------------------

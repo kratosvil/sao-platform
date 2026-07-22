@@ -132,6 +132,19 @@ def _get_gitops_token() -> str:
     return resp["SecretString"].strip()
 
 
+def _extract_tag(content_b64: str) -> str:
+    """
+    Extrae el valor de newTag de un kustomization.yaml en base64 -- regex simple
+    en vez de un parser YAML completo (mismo criterio que el resto del proyecto:
+    sin dependencias/Lambda Layer, ver Modulo 1). Devuelve "" si no matchea.
+    """
+    import base64
+    import re
+    text = base64.b64decode(content_b64).decode()
+    m = re.search(r"newTag:\s*(\S+)", text)
+    return m.group(1) if m else ""
+
+
 def _argocd_rollback_via_git(params: dict) -> dict:
     """
     Revierte un archivo del repo de manifiestos (saga-gitops-manifests) a
@@ -194,6 +207,14 @@ def _argocd_rollback_via_git(params: dict) -> dict:
         "pr_number": pr["number"],
         "head_sha": pr["head"]["sha"],
         "branch": branch,
+        # Modulo 4: guardados para la fase de erradicacion -- bad_tag es lo
+        # que estaba en main ANTES del revert (la causa del incidente),
+        # good_tag es a lo que se revirtio. current_file ya tiene el
+        # contenido de main (la rama nueva se creo desde ahi), no hace
+        # falta un fetch extra.
+        "path": path,
+        "bad_tag": _extract_tag(current_file["content"]),
+        "good_tag": _extract_tag(old_content_b64),
     }
 
 
@@ -340,6 +361,9 @@ def handler(event, context):
             proposal["head_sha"] = result["head_sha"]
             proposal["pr_branch"] = result["branch"]
             proposal["pr_opened_at"] = now
+            proposal["gitops_path"] = result["path"]
+            proposal["bad_tag"] = result["bad_tag"]
+            proposal["good_tag"] = result["good_tag"]
             _save_proposal(token, proposal)
             _notify(
                 f"[SAO] PR en cola de auto-merge — {alarm_name}",
@@ -356,6 +380,39 @@ def handler(event, context):
                 f"<strong>PR:</strong> <a href=\"{result['html_url']}\">{result['html_url']}</a><br><br>"
                 f"decision_state=auto_execute -- se mergea solo si el CI pasa "
                 f"(lambda-hitl-poller revisa cada 1 min), sin click humano.<br>"
+                f"<strong>Alarma:</strong> {alarm_name}<br><strong>Recurso:</strong> {node_id}",
+            )
+
+        # Modulo 4: un fix de argocd_rollback_via_git en escalate ya paso la
+        # aprobacion humana para el CONTENIDO del PR, pero el merge en si lo
+        # hace el humano a mano en GitHub cuando quiera -- no hay forma de
+        # saber desde aca cuando pasa eso. Queda "pending_merge", y el poller
+        # (mismo ciclo de 1 min que ya revisa pending_ci) chequea si ya se
+        # mergeo antes de pasar a la verificacion de cierre de loop.
+        if action == "argocd_rollback_via_git" and isinstance(result, dict):
+            proposal["status"] = "pending_merge"
+            proposal["pr_number"] = result["pr_number"]
+            proposal["pr_branch"] = result["branch"]
+            proposal["pr_opened_at"] = now
+            proposal["gitops_path"] = result["path"]
+            proposal["bad_tag"] = result["bad_tag"]
+            proposal["good_tag"] = result["good_tag"]
+            _save_proposal(token, proposal)
+            _notify(
+                f"[SAO] PR abierto, esperando merge humano — {alarm_name}",
+                f"PR abierto y validado -- falta que lo mergees a mano en GitHub cuando "
+                f"quieras revisarlo. Una vez mergeado, SAGA verifica solo que la alerta "
+                f"se resuelva antes de generar el guardrail (Modulo 4).\n\n"
+                f"Alarma: {alarm_name}\nRecurso: {node_id}\n"
+                f"PR: {result['html_url']}\n\n"
+                f"Propuesta original:\n{proposal.get('proposal_text', '')}",
+            )
+            print(f"Escalate PR opened, pending human merge: token={token} pr={result['pr_number']}")
+            return _html_response(
+                200,
+                "PR abierto — esperando merge humano",
+                f"<strong>PR:</strong> <a href=\"{result['html_url']}\">{result['html_url']}</a><br><br>"
+                f"Mergealo a mano en GitHub cuando quieras. SAGA sigue el resto solo.<br>"
                 f"<strong>Alarma:</strong> {alarm_name}<br><strong>Recurso:</strong> {node_id}",
             )
 
