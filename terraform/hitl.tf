@@ -31,27 +31,27 @@ resource "aws_iam_role_policy" "hitl" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "ReadWriteProposals"
-        Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject"]
+        Sid      = "ReadWriteProposals"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
         Resource = "arn:aws:s3:::${var.graph_bucket_name}/proposals/*"
       },
       {
-        Sid    = "ReadWriteDigitalTwin"
-        Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject"]
+        Sid      = "ReadWriteDigitalTwin"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
         Resource = "arn:aws:s3:::${var.graph_bucket_name}/sao/digital_twin.json"
       },
       {
-        Sid    = "BedrockEmbeddings"
-        Effect = "Allow"
-        Action = ["bedrock:InvokeModel"]
+        Sid      = "BedrockEmbeddings"
+        Effect   = "Allow"
+        Action   = ["bedrock:InvokeModel"]
         Resource = "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v1"
       },
       {
-        Sid    = "PublishSNS"
-        Effect = "Allow"
-        Action = ["sns:Publish"]
+        Sid      = "PublishSNS"
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
         Resource = aws_sns_topic.alarms.arn
       },
       # Módulo 2 (SAGA): se eliminaron los Sid ExecuteLambda/ExecuteECS/ExecuteRDS

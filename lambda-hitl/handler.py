@@ -132,14 +132,14 @@ def _get_gitops_token() -> str:
     return resp["SecretString"].strip()
 
 
-def _argocd_rollback_via_git(params: dict) -> str:
+def _argocd_rollback_via_git(params: dict) -> dict:
     """
     Revierte un archivo del repo de manifiestos (saga-gitops-manifests) a
     una revision anterior conocida-buena, via un PR nuevo. El agente NUNCA
-    commitea directo a `main` -- esa es la rama que ArgoCD observa. El PR
-    queda sujeto a los checks de CI (dry-run/OPA + Semgrep/Trivy/Gitleaks,
-    Modulos 1/24) y requiere aprobacion humana explicita antes de mergear
-    (decision de diseno SV-AOP-012: sin auto-merge, ver estado.md Modulo 1).
+    commitea directo a `main` -- esa es la rama que ArgoCD observa. El merge
+    del PR depende de decision_state (Modulo 3): auto_execute lo mergea solo
+    si el CI pasa (ver _check_pending_ci / lambda-hitl-poller), escalate
+    siempre requiere un click humano explicito.
     """
     path = params["path"]
     revert_to = params["revert_to"]
@@ -173,7 +173,8 @@ def _argocd_rollback_via_git(params: dict) -> str:
         "branch": branch,
     })
 
-    # 6. PR contra main -- el merge queda sujeto a CI + revision humana, nunca automatico
+    # 6. PR contra main -- el merge depende de decision_state (Modulo 3), nunca se
+    # commitea directo a main sea cual sea el estado
     pr = _github_request("POST", f"/repos/{repo}/pulls", token, {
         "title": f"SAGA: revert {path} to {revert_to[:12]}",
         "head": branch,
@@ -182,16 +183,27 @@ def _argocd_rollback_via_git(params: dict) -> str:
             f"Fix propuesto automaticamente por SAGA.\n\n"
             f"- Archivo: `{path}`\n"
             f"- Revertido a: `{revert_to}`\n\n"
-            f"Requiere aprobacion humana explicita -- este PR no se auto-mergea "
-            f"(decision de diseno SV-AOP-012, ver estado.md Modulo 1)."
+            f"El merge depende del gate de 3 estados (decision_state) -- ver estado.md "
+            f"SV-AOP-012 Modulo 3."
         ),
     })
 
-    return f"PR abierto: {pr['html_url']} (rama {branch}) -- pendiente de revision humana, no se mergeo solo"
+    return {
+        "message": f"PR abierto: {pr['html_url']} (rama {branch})",
+        "html_url": pr["html_url"],
+        "pr_number": pr["number"],
+        "head_sha": pr["head"]["sha"],
+        "branch": branch,
+    }
 
 
-def _execute_action(action: str, params: dict) -> str:
-    """Ejecuta la acción boto3 predefinida. Retorna descripción de lo ejecutado."""
+def _execute_action(action: str, params: dict):
+    """
+    Ejecuta la accion predefinida. Retorna un str para las acciones legacy
+    (lambda_update_*/ecs_*/rds_reboot_instance -- quedan a proposito, ver
+    Modulo 2: el IAM ya no permite escribir, sirven de evidencia del test
+    negativo) o un dict con datos del PR para argocd_rollback_via_git.
+    """
     lm = boto3.client("lambda", region_name=AWS_REGION)
     ecs = boto3.client("ecs", region_name=AWS_REGION)
     rds = boto3.client("rds", region_name=AWS_REGION)
@@ -313,9 +325,40 @@ def handler(event, context):
     # --- APROBAR ---
     action = proposal.get("action", "none")
     action_params = proposal.get("action_params", {})
+    decision_state = proposal.get("decision_state", "escalate")
 
     try:
         result = _execute_action(action, action_params)
+
+        # Modulo 3: auto_execute no se da por ejecutado al abrir el PR -- queda
+        # "pending_ci", esperando a que lambda-hitl-poller confirme que el CI
+        # paso antes de mergear. escalate (o cualquier accion legacy) mantiene
+        # el comportamiento de siempre: se marca ejecutado al abrir/correr.
+        if action == "argocd_rollback_via_git" and decision_state == "auto_execute" and isinstance(result, dict):
+            proposal["status"] = "pending_ci"
+            proposal["pr_number"] = result["pr_number"]
+            proposal["head_sha"] = result["head_sha"]
+            proposal["pr_branch"] = result["branch"]
+            proposal["pr_opened_at"] = now
+            _save_proposal(token, proposal)
+            _notify(
+                f"[SAO] PR en cola de auto-merge — {alarm_name}",
+                f"decision_state=auto_execute -- el PR se mergea solo si el CI pasa, "
+                f"sin intervencion humana. Si el CI falla, se marca auto_reject.\n\n"
+                f"Alarma: {alarm_name}\nRecurso: {node_id}\n"
+                f"PR: {result['html_url']}\n\n"
+                f"Propuesta original:\n{proposal.get('proposal_text', '')}",
+            )
+            print(f"Auto-execute PR opened, pending CI: token={token} pr={result['pr_number']}")
+            return _html_response(
+                200,
+                "PR abierto — en cola de auto-merge",
+                f"<strong>PR:</strong> <a href=\"{result['html_url']}\">{result['html_url']}</a><br><br>"
+                f"decision_state=auto_execute -- se mergea solo si el CI pasa "
+                f"(lambda-hitl-poller revisa cada 1 min), sin click humano.<br>"
+                f"<strong>Alarma:</strong> {alarm_name}<br><strong>Recurso:</strong> {node_id}",
+            )
+
         proposal["status"] = "executed"
         proposal["execution_result"] = result
         proposal["resolved_at"] = now

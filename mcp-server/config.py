@@ -15,14 +15,12 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 HITL_SNS_TOPIC = os.getenv("HITL_SNS_TOPIC", "")
 HITL_TIMEOUT_SECONDS = int(os.getenv("HITL_TIMEOUT_SECONDS", "300"))
 HITL_API_URL = os.getenv("HITL_API_URL", "")  # API Gateway URL del executor HITL
+HITL_LAMBDA_NAME = os.getenv("HITL_LAMBDA_NAME", "sao-lambda-hitl")  # invoke directo para auto_execute
 
 # MCP
 MCP_SERVER_NAME = "sao-platform"
 MCP_SERVER_VERSION = "0.1.0"
 
-# Politica de riesgo — define quien aprueba
-RISK_POLICY = {
-    "LOW": "auto",        # auto-aprobado
-    "MEDIUM": "oncall",   # on-call engineer
-    "HIGH": "manager",    # manager approval required
-}
+# Nota: la clasificacion de riesgo real que decide auto_execute/escalate vive en
+# app.py::_decide_state (SV-AOP-012 Modulo 3) -- es una regla de codigo sobre los
+# params de la accion propuesta, nunca el RISK: que el modelo se autoasigna.

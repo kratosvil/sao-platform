@@ -29,11 +29,11 @@ module "ecs_fargate" {
   container_memory = var.mcp_server_memory
 
   container_environment = [
-    { name = "GRAPH_BUCKET",      value = aws_s3_bucket.graph_store.bucket },
-    { name = "GRAPH_KEY",         value = "sao/digital_twin.json" },
-    { name = "BEDROCK_MODEL_ID",  value = var.bedrock_model_id },
-    { name = "HITL_SNS_TOPIC",    value = aws_sns_topic.alarms.arn },
-    { name = "HITL_API_URL",      value = aws_apigatewayv2_api.hitl.api_endpoint },
+    { name = "GRAPH_BUCKET", value = aws_s3_bucket.graph_store.bucket },
+    { name = "GRAPH_KEY", value = "sao/digital_twin.json" },
+    { name = "BEDROCK_MODEL_ID", value = var.bedrock_model_id },
+    { name = "HITL_SNS_TOPIC", value = aws_sns_topic.alarms.arn },
+    { name = "HITL_API_URL", value = aws_apigatewayv2_api.hitl.api_endpoint },
     { name = "SLACK_WEBHOOK_SSM", value = var.slack_webhook_ssm_param },
   ]
 
@@ -58,15 +58,15 @@ resource "aws_iam_role_policy" "mcp_server" {
         ]
       },
       {
-        Sid    = "BedrockMarketplace"
-        Effect = "Allow"
-        Action = ["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"]
+        Sid      = "BedrockMarketplace"
+        Effect   = "Allow"
+        Action   = ["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"]
         Resource = "*"
       },
       {
-        Sid    = "ReadGraph"
-        Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject"]
+        Sid      = "ReadGraph"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
         Resource = "arn:aws:s3:::${var.graph_bucket_name}/*"
       },
       {
@@ -103,15 +103,26 @@ resource "aws_iam_role_policy" "mcp_server" {
         Resource = "*"
       },
       {
-        Sid    = "SSMReadSlack"
-        Effect = "Allow"
-        Action = ["ssm:GetParameter"]
+        # Módulo 3 (SAGA): única vía de escritura indirecta -- disparar la
+        # aprobación automática de decision_state=auto_execute invocando el
+        # ejecutor HITL (ver mcp-server/app.py::_invoke_hitl_approve). Acotado
+        # a esa función puntual, no a function:* -- el razonador sigue sin
+        # poder tocar AWS el mismo, solo puede pedirle al HITL que actúe.
+        Sid      = "InvokeHitlExecutor"
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:sao-lambda-hitl"
+      },
+      {
+        Sid      = "SSMReadSlack"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
         Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/sao/*"
       },
       {
-        Sid    = "PublishSNS"
-        Effect = "Allow"
-        Action = ["sns:Publish"]
+        Sid      = "PublishSNS"
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
         Resource = aws_sns_topic.alarms.arn
       },
     ]
