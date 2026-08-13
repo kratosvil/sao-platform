@@ -52,6 +52,21 @@ resource "aws_iam_role_policy" "hitl" {
         Resource = "arn:aws:s3:::${var.graph_bucket_name}/proposals/*"
       },
       {
+        # Modulo 10: /hitl/pending necesita listar objetos, no solo leer uno
+        # puntual por su key -- gap real encontrado al probar en vivo (el
+        # HITL nunca antes necesitaba ListBucket, solo Get/Put por token
+        # conocido). Acotado al prefijo proposals/, no todo el bucket.
+        Sid      = "ListProposals"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = "arn:aws:s3:::${var.graph_bucket_name}"
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["proposals/*"]
+          }
+        }
+      },
+      {
         Sid      = "ReadWriteDigitalTwin"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
