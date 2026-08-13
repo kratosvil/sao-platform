@@ -17,6 +17,7 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.request
 import urllib.error
 import boto3
@@ -38,7 +39,13 @@ sns_client = boto3.client("sns", region_name=AWS_REGION)
 secretsmanager = boto3.client("secretsmanager", region_name=AWS_REGION)
 
 
-def _github_request(method: str, path: str, token: str, body: dict = None) -> dict:
+def _github_request(method: str, path: str, token: str, body: dict = None, retries: int = 3) -> dict:
+    """
+    Reintenta con backoff corto solo sobre errores de red/SO (mismo hallazgo
+    que _alert_firing -- "Device or resource busy" intermitente en Lambda
+    "caliente"). Nunca reintenta un HTTPError -- esa es una respuesta real de
+    GitHub (4xx/5xx), reintentar ciegamente podria duplicar un POST/PUT.
+    """
     req = urllib.request.Request(
         f"https://api.github.com{path}",
         data=json.dumps(body).encode() if body is not None else None,
@@ -50,12 +57,19 @@ def _github_request(method: str, path: str, token: str, body: dict = None) -> di
         },
         method=method,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode()
-        raise RuntimeError(f"GitHub API {method} {path} -> {e.code}: {detail}")
+    last_error = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode()
+            raise RuntimeError(f"GitHub API {method} {path} -> {e.code}: {detail}")
+        except OSError as e:
+            last_error = e
+            if attempt < retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+    raise last_error
 
 
 def _get_gitops_token() -> str:
@@ -109,14 +123,33 @@ def _pr_state(token: str, pr_number: int) -> dict:
     return _github_request("GET", f"/repos/{GITOPS_MANIFESTS_REPO}/pulls/{pr_number}", token)
 
 
-def _alert_firing(alarm_name: str) -> bool:
-    """True si la alerta sigue firing en Prometheus ahora mismo."""
+def _alert_firing(alarm_name: str, retries: int = 3) -> bool:
+    """
+    True si la alerta sigue firing en Prometheus ahora mismo. Reintenta con
+    backoff corto -- hallazgo real 2026-08-12/13: en un Lambda "caliente"
+    (mismo entorno de ejecucion reusado muchos ciclos seguidos, sin cold
+    start) las llamadas de urllib a este mismo host fallaban intermitente
+    con "OSError [Errno 16] Device or resource busy" (glibc pisando
+    /etc/resolv.conf mientras Lambda lo reescribe internamente -- no es un
+    problema del host de Prometheus, confirmado probando la misma URL fuera
+    de Lambda sin fallos). No bloqueante para el llamador: si se agotan los
+    reintentos, propaga la excepcion igual que antes (el ciclo de 1 min
+    siguiente lo vuelve a intentar).
+    """
     if not PROMETHEUS_URL:
         return False
     url = f"{PROMETHEUS_URL}/api/v1/query?query=ALERTS%7Balertname%3D%22{alarm_name}%22%2Calertstate%3D%22firing%22%7D"
-    with urllib.request.urlopen(url, timeout=15) as resp:
-        data = json.loads(resp.read())
-    return len(data.get("data", {}).get("result", [])) > 0
+    last_error = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                data = json.loads(resp.read())
+            return len(data.get("data", {}).get("result", [])) > 0
+        except OSError as e:
+            last_error = e
+            if attempt < retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+    raise last_error
 
 
 def _slugify(text: str) -> str:
