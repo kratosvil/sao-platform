@@ -145,6 +145,39 @@ def _extract_tag(content_b64: str) -> str:
     return m.group(1) if m else ""
 
 
+def _get_manifest_tag_history(path: str, limit: int = 5) -> list:
+    """
+    Fix de contexto real del nucleo (2026-08-12): historial real de commits
+    que tocaron este manifiesto, con el tag de imagen que tenia en cada uno --
+    le da a Bedrock el "ultimo tag bueno conocido" para revertir. Invocado
+    directo por mcp_server (que corre zero-egress, sin salida a GitHub ni a
+    Secrets Manager) via lambda:InvokeFunction
+    -- mismo patron que _invoke_hitl_approve pero al reves: este Lambda (que si
+    tiene salida a internet, no esta en la VPC) hace de proxy hacia GitHub para
+    el razonador aislado.
+    """
+    token = _get_gitops_token()
+    commits = _github_request(
+        "GET", f"/repos/{GITOPS_MANIFESTS_REPO}/commits?path={path}&sha=main&per_page={limit}", token,
+    )
+    history = []
+    for c in commits:
+        sha = c["sha"]
+        tag = ""
+        try:
+            content = _github_request("GET", f"/repos/{GITOPS_MANIFESTS_REPO}/contents/{path}?ref={sha}", token)
+            tag = _extract_tag(content["content"])
+        except Exception as e:
+            print(f"No se pudo leer {path} en {sha[:12]}: {e}")
+        history.append({
+            "sha": sha,
+            "date": c["commit"]["author"]["date"],
+            "message": c["commit"]["message"].splitlines()[0],
+            "tag": tag,
+        })
+    return history
+
+
 def _argocd_rollback_via_git(params: dict) -> dict:
     """
     Revierte un archivo del repo de manifiestos (saga-gitops-manifests) a
@@ -289,6 +322,21 @@ h2{{color:{'#1a7f37' if status_code == 200 else '#cf222e'}}}</style></head>
 
 
 def handler(event, context):
+    # Fix de contexto real del nucleo (2026-08-12): invocacion directa (no via
+    # API Gateway) para pedir el historial git de un manifiesto -- mcp_server
+    # corre zero-egress y no puede llegar a GitHub/Secrets Manager el mismo,
+    # se lo pide a este
+    # Lambda. Se distingue de los eventos de API Gateway (que siempre traen
+    # rawPath) por la clave "action".
+    if event.get("action") == "get_manifest_history":
+        path = event.get("path", "overlays/dev/kustomization.yaml")
+        try:
+            history = _get_manifest_tag_history(path, event.get("limit", 5))
+            return {"status": "ok", "history": history}
+        except Exception as e:
+            print(f"Error obteniendo historial de {path}: {e}")
+            return {"status": "error", "error": str(e), "history": []}
+
     params = event.get("queryStringParameters") or {}
     token = params.get("token", "").strip()
     raw_path = event.get("rawPath", "")

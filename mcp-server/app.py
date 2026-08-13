@@ -13,7 +13,8 @@ from pydantic import BaseModel
 from context_map import GraphStore, GraphQuery
 from config import (
     AWS_REGION, BEDROCK_MODEL_ID, BEDROCK_MAX_TOKENS,
-    GRAPH_BUCKET, HITL_SNS_TOPIC, HITL_API_URL,
+    GRAPH_BUCKET, HITL_SNS_TOPIC, HITL_API_URL, HITL_LAMBDA_NAME,
+    GITOPS_MANIFEST_PATH, GITOPS_RELEVANT_ALARMS,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -82,7 +83,39 @@ def _get_cloudwatch_context(alarm_name: str, node_id: str, region: str) -> dict:
     return context
 
 
-def _build_prompt(event: AlarmEvent, graph_context: dict, cw_context: dict) -> str:
+def _get_manifest_tag_history(path: str = GITOPS_MANIFEST_PATH, limit: int = 5) -> list[dict]:
+    """
+    Fix de contexto real del nucleo (2026-08-12): le pide al Lambda HITL el
+    historial git real de commits que tocaron este manifiesto (y el tag de
+    imagen que tenia en cada uno), para
+    darle a Bedrock el "ultimo tag bueno conocido" -- sin esto no tiene forma
+    de saber a que revertir (CloudWatch no tiene nada porque la alarma es de
+    Prometheus, y el Digital Twin puede no tener precedentes todavia).
+
+    mcp_server corre zero-egress (sin NAT, sin endpoint de Secrets Manager ni
+    salida a internet publica -- ver terraform/networking.tf) y no puede
+    llegar a GitHub el mismo. El Lambda HITL si tiene salida (no esta en la
+    VPC) y ya tiene el PAT, asi que hace de proxy: se lo invocamos directo
+    via el mismo permiso lambda:InvokeFunction que ya existia para
+    _invoke_hitl_approve (InvokeHitlExecutor en terraform/ecs.tf), sin IAM
+    nuevo. No bloqueante: si falla, retorna [] y el prompt sigue armandose
+    igual (mismo criterio que _compute_embedding).
+    """
+    try:
+        lam = boto3.client("lambda", region_name=AWS_REGION)
+        resp = lam.invoke(
+            FunctionName=HITL_LAMBDA_NAME,
+            InvocationType="RequestResponse",
+            Payload=json.dumps({"action": "get_manifest_history", "path": path, "limit": limit}).encode(),
+        )
+        payload = json.loads(resp["Payload"].read())
+        return payload.get("history", [])
+    except Exception as e:
+        logger.warning("No se pudo obtener el historial de %s vía Lambda HITL: %s", path, e)
+        return []
+
+
+def _build_prompt(event: AlarmEvent, graph_context: dict, cw_context: dict, tag_history: list[dict] | None = None) -> str:
     return f"""You are an autonomous AWS infrastructure operations agent.
 An alarm has fired. Analyze the full context and propose an exact, safe remediation.
 
@@ -99,6 +132,14 @@ An alarm has fired. Analyze the full context and propose an exact, safe remediat
 
 ## Infrastructure context (from Digital Twin)
 {json.dumps(graph_context, indent=2, default=str)}
+
+## Deployment history for {GITOPS_MANIFEST_PATH} (real git log, most recent first)
+{json.dumps(tag_history or [], indent=2, default=str)}
+The FIRST entry above is the currently deployed (likely broken) revision that
+triggered this incident. If you propose argocd_rollback_via_git, `revert_to`
+MUST be the exact `sha` value (not the tag) of the most recent entry in this
+list whose `tag` differs from the first entry's tag -- that is the last known
+good revision for this exact path. If the list is empty, use ACTION: none.
 
 ## Instructions
 1. Identify the root cause based on alarm state and logs.
@@ -120,7 +161,7 @@ An alarm has fired. Analyze the full context and propose an exact, safe remediat
 Available action names for the ACTION line -- this agent has NO direct write access to
 AWS (IAM enforces read-only, SV-AOP-012 Modulo 2). The only way to change anything is
 proposing a GitOps commit that ArgoCD then syncs:
-- argocd_rollback_via_git path=<manifest_path_in_repo> revert_to=<git_ref_or_tag>
+- argocd_rollback_via_git path=<manifest_path_in_repo> revert_to=<exact_sha_from_deployment_history_above>
 - none reason=<brief_explanation_no_spaces_use_underscores>
 """
 
@@ -149,7 +190,6 @@ def _invoke_hitl_approve(token: str) -> None:
     al rol razonador (permiso lambda:InvokeFunction acotado a esta funcion puntual,
     ver terraform/ecs.tf) -- el razonador sigue sin poder tocar AWS el mismo.
     """
-    from config import HITL_LAMBDA_NAME
     if not HITL_LAMBDA_NAME:
         logger.warning("HITL_LAMBDA_NAME no configurado -- no se puede auto-aprobar token=%s", token)
         return
@@ -249,7 +289,14 @@ def debug_prompt(event: AlarmEvent):
     query_embedding = _compute_embedding(query_text)
     graph_context = query.context_for_agent(event.alarm_name, event.node_id, query_embedding)
     cw_context = _get_cloudwatch_context(event.alarm_name, event.node_id, event.region)
-    prompt = _build_prompt(event, graph_context, cw_context)
+    # Filtro rapido (2026-08-12): el historial solo aplica a las alarmas para
+    # las que este path es realmente la causa/fix -- sin esto, cualquier
+    # alarma no relacionada recibia el mismo contexto y Bedrock proponia el
+    # mismo revert (hallazgo real: AlertmanagerFailedToSendAlerts). No
+    # reemplaza el dedup real (Modulo 12, backlog) -- solo evita contexto
+    # irrelevante, no evita llamadas duplicadas a Bedrock.
+    tag_history = _get_manifest_tag_history() if event.alarm_name in GITOPS_RELEVANT_ALARMS else []
+    prompt = _build_prompt(event, graph_context, cw_context, tag_history)
     return {
         "model": BEDROCK_MODEL_ID,
         "max_tokens": BEDROCK_MAX_TOKENS,
@@ -258,6 +305,7 @@ def debug_prompt(event: AlarmEvent):
         "rag_mode": "semantic" if query_embedding else "fallback",
         "graph_context": graph_context,
         "cloudwatch_context": cw_context,
+        "tag_history": tag_history,
         "full_prompt": prompt,
     }
 
@@ -283,9 +331,19 @@ def handle_incident(event: AlarmEvent):
     # 3. Consultar CloudWatch en tiempo real
     cw_context = _get_cloudwatch_context(event.alarm_name, event.node_id, event.region)
 
+    # 3b. Historial git real del manifiesto GitOps -- le da a Bedrock el
+    # "ultimo tag bueno conocido" en vez de que tenga que adivinarlo.
+    # Filtro rapido (2026-08-12): el historial solo aplica a las alarmas para
+    # las que este path es realmente la causa/fix -- sin esto, cualquier
+    # alarma no relacionada recibia el mismo contexto y Bedrock proponia el
+    # mismo revert (hallazgo real: AlertmanagerFailedToSendAlerts). No
+    # reemplaza el dedup real (Modulo 12, backlog) -- solo evita contexto
+    # irrelevante, no evita llamadas duplicadas a Bedrock.
+    tag_history = _get_manifest_tag_history() if event.alarm_name in GITOPS_RELEVANT_ALARMS else []
+
     # 4. Llamar a Bedrock
     bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION)
-    prompt = _build_prompt(event, graph_context, cw_context)
+    prompt = _build_prompt(event, graph_context, cw_context, tag_history)
     try:
         resp = bedrock.invoke_model(
             modelId=BEDROCK_MODEL_ID,

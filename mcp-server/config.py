@@ -21,6 +21,26 @@ HITL_LAMBDA_NAME = os.getenv("HITL_LAMBDA_NAME", "sao-lambda-hitl")  # invoke di
 MCP_SERVER_NAME = "sao-platform"
 MCP_SERVER_VERSION = "0.1.0"
 
+# Fix de contexto real del nucleo (2026-08-12): historial git real del manifiesto
+# GitOps para darle a Bedrock el "ultimo tag bueno conocido" -- sin esto devolvia
+# ACTION: none por falta de contexto. Solo el path -- mcp_server corre zero-egress
+# y no toca GitHub/Secrets Manager el mismo, le pide el historial al Lambda HITL
+# (ver app.py::_get_manifest_tag_history).
+GITOPS_MANIFEST_PATH = os.getenv("GITOPS_MANIFEST_PATH", "overlays/dev/kustomization.yaml")
+
+# Alarmas para las que este historial es relevante -- sin este filtro, CUALQUIER
+# incidente (aunque no tenga nada que ver con este path) recibia el mismo
+# historial y Bedrock proponia el mismo revert para alarmas no relacionadas
+# (hallazgo real 2026-08-12: AlertmanagerFailedToSendAlerts/
+# AlertmanagerClusterFailedToSendAlerts dispararon el mismo fix). No rompio nada
+# porque el revert era idempotente y seguro, pero es el sintoma exacto del gap
+# de dedup/rate-limiting ya anotado en el backlog -- el arreglo estructural real
+# (no proponer una accion si ya hay una equivalente en curso) queda para el
+# Modulo 12 (Cost & Policy Gate). Esto es solo el filtro rapido: no evita
+# llamadas duplicadas a Bedrock, evita que una alarma no relacionada reciba
+# contexto que no le corresponde.
+GITOPS_RELEVANT_ALARMS = {a.strip() for a in os.getenv("GITOPS_RELEVANT_ALARMS", "SagaPodCrashLooping").split(",") if a.strip()}
+
 # Nota: la clasificacion de riesgo real que decide auto_execute/escalate vive en
 # app.py::_decide_state (SV-AOP-012 Modulo 3) -- es una regla de codigo sobre los
 # params de la accion propuesta, nunca el RISK: que el modelo se autoasigna.
