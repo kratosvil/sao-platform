@@ -366,25 +366,39 @@ pre{{white-space:pre-wrap;background:#f7f9f7;padding:14px;border-radius:6px;font
 .pill{{font-family:ui-monospace,monospace;font-size:11px;padding:2px 8px;border-radius:99px;background:#e4e9e5}}
 </style></head>
 <body><h2>{title}</h2>{body}
-<hr><small><a href="/hitl/pending">&larr; volver a pendientes</a></small></body></html>""",
+<hr><small><a href="/hitl/pending">&larr; volver a pendientes</a> &middot; <a href="/hitl/logout">cerrar sesión</a></small></body></html>""",
     }
 
 
 def _check_console_auth(event: dict) -> bool:
     """
-    Bearer token compartido para las rutas de consola (Modulo 10). Los links
-    de /hitl/approve|reject NO pasan por aca -- son de un solo uso, seguros
-    por posesion del link. /hitl/pending lista TODO en una sola URL, blast
-    radius mayor, necesita su propio gate. Fail-closed: sin
-    CONSOLE_TOKEN_PARAM configurado o sin match exacto, deniega.
+    Bearer token compartido para las rutas de consola (Modulo 10). Acepta el
+    mismo token presentado de dos formas: header Authorization (curl/scripts,
+    sin cambios) o cookie de sesion "hitl_session" (login por navegador,
+    Modulo 10b -- 2026-08-13, agregado porque el demo se graba desde otra PC
+    y un Bearer header no es navegable directo). Los links de
+    /hitl/approve|reject NO pasan por aca -- son de un solo uso, seguros por
+    posesion del link. /hitl/pending lista TODO en una sola URL, blast radius
+    mayor, necesita su propio gate. Fail-closed: sin CONSOLE_TOKEN_PARAM
+    configurado o sin match exacto, deniega.
     """
     if not CONSOLE_TOKEN_PARAM:
         return False
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+    presented = ""
     auth_header = headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
+    if auth_header.startswith("Bearer "):
+        presented = auth_header[len("Bearer "):].strip()
+    if not presented:
+        # API Gateway HTTP API (payload v2) separa las cookies del request en
+        # su propio campo "cookies" (lista "nombre=valor"), no van dentro de
+        # event["headers"] -- por eso no alcanza con headers.get("cookie").
+        for c in event.get("cookies", []) or []:
+            if c.startswith("hitl_session="):
+                presented = c[len("hitl_session="):].strip()
+                break
+    if not presented:
         return False
-    presented = auth_header[len("Bearer "):].strip()
     try:
         resp = ssm.get_parameter(Name=CONSOLE_TOKEN_PARAM, WithDecryption=True)
         expected = resp["Parameter"]["Value"]
@@ -392,6 +406,16 @@ def _check_console_auth(event: dict) -> bool:
         print(f"No se pudo leer el token de consola: {e}")
         return False
     return presented == expected
+
+
+def _require_console_auth(event: dict):
+    """Reutilizado por las 3 rutas protegidas de consola -- None si esta
+    autenticado, o una respuesta 302 a /hitl/login si no (mejor UX en
+    navegador que un 401 en blanco; sigue siendo fail-closed, no expone
+    datos)."""
+    if _check_console_auth(event):
+        return None
+    return {"statusCode": 302, "headers": {"Location": "/hitl/login"}, "body": ""}
 
 
 def _list_pending_proposals() -> list:
@@ -572,9 +596,62 @@ def _process_approval(token: str, proposal: dict, now: str, action_params_overri
         )
 
 
+def _handle_login_get(event: dict, error: str = "") -> dict:
+    err_html = f'<p style="color:#a83731">{error}</p>' if error else ""
+    body = f"""
+    {err_html}
+    <form method="POST" action="/hitl/login">
+      <label>Token de consola<br><input type="password" name="token" autofocus></label>
+      <p><button class="btn approve" type="submit">Entrar</button></p>
+    </form>
+    """
+    return _console_page(200, "Login", body)
+
+
+def _handle_login_post(event: dict) -> dict:
+    body_raw = event.get("body", "") or ""
+    if event.get("isBase64Encoded"):
+        body_raw = base64.b64decode(body_raw).decode()
+    form = urllib.parse.parse_qs(body_raw)
+    presented = form.get("token", [""])[0].strip()
+
+    if not CONSOLE_TOKEN_PARAM:
+        return _handle_login_get(event, "Consola no configurada (falta CONSOLE_TOKEN_PARAM).")
+    try:
+        resp = ssm.get_parameter(Name=CONSOLE_TOKEN_PARAM, WithDecryption=True)
+        expected = resp["Parameter"]["Value"]
+    except Exception as e:
+        print(f"No se pudo leer el token de consola: {e}")
+        return _handle_login_get(event, "Error interno de autenticacion.")
+
+    if not presented or presented != expected:
+        return _handle_login_get(event, "Token incorrecto.")
+
+    # Cookie de sesion = el token mismo (misma fuente de verdad que el header
+    # Bearer, sin sesiones opacas server-side -- token ya vive en SSM
+    # SecureString). HttpOnly (JS no la lee), Secure (API Gateway es HTTPS
+    # siempre), SameSite=Lax (alcanza para forms same-site), 12h de vida.
+    return {
+        "statusCode": 302,
+        "headers": {"Location": "/hitl/pending"},
+        "cookies": [f"hitl_session={presented}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Lax"],
+        "body": "",
+    }
+
+
+def _handle_logout(event: dict) -> dict:
+    return {
+        "statusCode": 302,
+        "headers": {"Location": "/hitl/login"},
+        "cookies": ["hitl_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"],
+        "body": "",
+    }
+
+
 def _handle_pending(event: dict) -> dict:
-    if not _check_console_auth(event):
-        return {"statusCode": 401, "body": "Unauthorized"}
+    unauth = _require_console_auth(event)
+    if unauth:
+        return unauth
     proposals = _list_pending_proposals()
     if not proposals:
         body = "<p>No hay propuestas pendientes ahora mismo.</p>"
@@ -597,8 +674,9 @@ def _handle_pending(event: dict) -> dict:
 
 
 def _handle_review_get(event: dict) -> dict:
-    if not _check_console_auth(event):
-        return {"statusCode": 401, "body": "Unauthorized"}
+    unauth = _require_console_auth(event)
+    if unauth:
+        return unauth
     token = (event.get("pathParameters") or {}).get("token", "")
     try:
         proposal = _load_proposal(token)
@@ -637,8 +715,9 @@ def _handle_review_get(event: dict) -> dict:
 
 
 def _handle_review_post(event: dict) -> dict:
-    if not _check_console_auth(event):
-        return {"statusCode": 401, "body": "Unauthorized"}
+    unauth = _require_console_auth(event)
+    if unauth:
+        return unauth
     token = (event.get("pathParameters") or {}).get("token", "")
     body_raw = event.get("body", "") or ""
     if event.get("isBase64Encoded"):
@@ -687,6 +766,15 @@ def handler(event, context):
 
     raw_path = event.get("rawPath", "")
     method = (event.get("requestContext", {}).get("http", {}) or {}).get("method", "GET")
+
+    # Modulo 10b: login por cookie -- estas 3 rutas son publicas a proposito
+    # (son el mecanismo para conseguir la sesion, no pueden requerir sesion).
+    if raw_path == "/hitl/login" and method == "GET":
+        return _handle_login_get(event)
+    if raw_path == "/hitl/login" and method == "POST":
+        return _handle_login_post(event)
+    if raw_path == "/hitl/logout" and method == "GET":
+        return _handle_logout(event)
 
     # Modulo 10: rutas de consola -- todas requieren CONSOLE_TOKEN_PARAM.
     if raw_path == "/hitl/pending" and method == "GET":

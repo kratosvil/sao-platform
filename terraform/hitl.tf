@@ -175,6 +175,28 @@ resource "aws_apigatewayv2_route" "review_post" {
   target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
 }
 
+# Modulo 10b (2026-08-13): login por cookie -- permite navegar la consola
+# desde cualquier PC/navegador sin Bearer header ni proxy local (necesario
+# porque el demo se graba desde otra maquina). Publicas a proposito: son el
+# mecanismo para conseguir la sesion.
+resource "aws_apigatewayv2_route" "login_get" {
+  api_id    = aws_apigatewayv2_api.hitl.id
+  route_key = "GET /hitl/login"
+  target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
+}
+
+resource "aws_apigatewayv2_route" "login_post" {
+  api_id    = aws_apigatewayv2_api.hitl.id
+  route_key = "POST /hitl/login"
+  target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
+}
+
+resource "aws_apigatewayv2_route" "logout" {
+  api_id    = aws_apigatewayv2_api.hitl.id
+  route_key = "GET /hitl/logout"
+  target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
+}
+
 resource "aws_apigatewayv2_stage" "hitl_default" {
   api_id      = aws_apigatewayv2_api.hitl.id
   name        = "$default"
