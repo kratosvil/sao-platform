@@ -15,6 +15,7 @@ from config import (
     AWS_REGION, BEDROCK_MODEL_ID, BEDROCK_MAX_TOKENS,
     GRAPH_BUCKET, HITL_SNS_TOPIC, HITL_API_URL, HITL_LAMBDA_NAME,
     GITOPS_MANIFEST_PATH, GITOPS_RELEVANT_ALARMS,
+    BEDROCK_PRICE_PER_1K_INPUT, BEDROCK_PRICE_PER_1K_OUTPUT,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -199,6 +200,20 @@ def _invoke_hitl_approve(token: str) -> None:
     logger.info("Auto-aprobacion disparada -- token=%s", token)
 
 
+def _compute_cost(usage: dict) -> dict:
+    """
+    Modulo 12 (version minima): calcula el costo real de la llamada a Bedrock
+    a partir de usage.input_tokens/output_tokens que ya vienen en la
+    respuesta -- hasta ahora se leian y se descartaban sin mirar. No hay
+    ledger ni dedup todavia (eso es el Modulo 12 completo, backlog) -- esto
+    solo hace visible el costo por decision en la consola del Modulo 10.
+    """
+    tokens_in = usage.get("input_tokens", 0)
+    tokens_out = usage.get("output_tokens", 0)
+    cost = (tokens_in / 1000 * BEDROCK_PRICE_PER_1K_INPUT) + (tokens_out / 1000 * BEDROCK_PRICE_PER_1K_OUTPUT)
+    return {"tokens_in": tokens_in, "tokens_out": tokens_out, "estimated_cost_usd": round(cost, 6)}
+
+
 def _extract_risk(proposal: str) -> str:
     for line in proposal.splitlines():
         if line.startswith("RISK:"):
@@ -355,6 +370,7 @@ def handle_incident(event: AlarmEvent):
         )
         result = json.loads(resp["body"].read())
         proposal = result["content"][0]["text"]
+        cost = _compute_cost(result.get("usage", {}))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bedrock error: {e}")
 
@@ -362,8 +378,9 @@ def handle_incident(event: AlarmEvent):
     action, action_params = _parse_action(proposal)
     decision_state = _decide_state(action, action_params)
     logger.info(
-        "Proposal generated — risk=%s action=%s decision_state=%s node=%s",
+        "Proposal generated — risk=%s action=%s decision_state=%s node=%s cost=$%.6f (%d in / %d out tokens)",
         risk, action, decision_state, event.node_id,
+        cost["estimated_cost_usd"], cost["tokens_in"], cost["tokens_out"],
     )
 
     # 5. Guardar propuesta en S3 con token unico para HITL
@@ -382,6 +399,9 @@ def handle_incident(event: AlarmEvent):
             "decision_state": decision_state,
             "status": "pending",
             "created_at": now_ts,
+            "tokens_in": cost["tokens_in"],
+            "tokens_out": cost["tokens_out"],
+            "estimated_cost_usd": cost["estimated_cost_usd"],
         })
         logger.info("Proposal saved — token=%s action=%s", token, action)
     except Exception as e:
@@ -413,11 +433,15 @@ def handle_incident(event: AlarmEvent):
                     f"Token: {token}"
                 )
 
+            cost_line = (
+                f"\n\nCosto de esta decision: ${cost['estimated_cost_usd']:.6f} "
+                f"({cost['tokens_in']} tokens in / {cost['tokens_out']} tokens out)"
+            )
             sns = boto3.client("sns", region_name=AWS_REGION)
             sns.publish(
                 TopicArn=HITL_SNS_TOPIC,
                 Subject=f"[SAO] Incidente: {event.alarm_name} — Riesgo: {risk} — {decision_state}",
-                Message=proposal + hitl_block,
+                Message=proposal + cost_line + hitl_block,
             )
         except Exception as e:
             logger.warning("SNS publish failed: %s", e)

@@ -10,6 +10,14 @@ GRAPH_KEY = os.getenv("GRAPH_KEY", "sao/digital_twin.json")
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-5")
 BEDROCK_MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "4096"))
 
+# Modulo 12 (version minima, 2026-08-13): tabla de precios fija para calcular
+# el costo real de cada decision -- Claude Sonnet 4.6 en Bedrock, on-demand,
+# endpoint regional (~10% mas caro que el global): $3/$15 por millon de
+# tokens input/output. Verificar en https://aws.amazon.com/bedrock/pricing/
+# si se cambia de modelo -- no hay API para consultarlo en runtime.
+BEDROCK_PRICE_PER_1K_INPUT = float(os.getenv("BEDROCK_PRICE_PER_1K_INPUT", "0.003"))
+BEDROCK_PRICE_PER_1K_OUTPUT = float(os.getenv("BEDROCK_PRICE_PER_1K_OUTPUT", "0.015"))
+
 # HITL
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 HITL_SNS_TOPIC = os.getenv("HITL_SNS_TOPIC", "")

@@ -579,13 +579,20 @@ def _handle_pending(event: dict) -> dict:
     if not proposals:
         body = "<p>No hay propuestas pendientes ahora mismo.</p>"
     else:
+        total_cost = sum(p.get("estimated_cost_usd", 0) for p in proposals)
         rows = "".join(
             f"<tr><td>{p.get('alarm_name','')}</td><td><span class=\"pill\">{p.get('risk_level','')}</span></td>"
-            f"<td>{p.get('action','')}</td><td>{p.get('created_at','')[:19]}</td>"
+            f"<td>{p.get('action','')}</td><td>${p.get('estimated_cost_usd', 0):.6f}</td>"
+            f"<td>{p.get('created_at','')[:19]}</td>"
             f"<td><a class=\"btn approve\" href=\"/hitl/review/{p['token']}\">Revisar</a></td></tr>"
             for p in proposals
         )
-        body = f"<table><tr><th>Alarma</th><th>Riesgo</th><th>Acción</th><th>Creada</th><th></th></tr>{rows}</table>"
+        body = (
+            f"<table><tr><th>Alarma</th><th>Riesgo</th><th>Acción</th><th>Costo (Bedrock)</th><th>Creada</th><th></th></tr>{rows}</table>"
+            f"<p style=\"margin-top:14px;font-size:13px;color:#74807a\">Costo total de estas {len(proposals)} propuestas: "
+            f"<b style=\"color:#16211d\">${total_cost:.6f}</b> — solo cuenta la llamada a Bedrock que las generó, "
+            f"no hay ledger acumulado todavía (Módulo 12 completo, backlog).</p>"
+        )
     return _console_page(200, f"Propuestas pendientes ({len(proposals)})", body)
 
 
@@ -614,6 +621,8 @@ def _handle_review_get(event: dict) -> dict:
     <b>Recurso:</b> {proposal.get('node_id')} &nbsp;
     <b>Riesgo (IA):</b> <span class="pill">{proposal.get('risk_level')}</span></p>
     <p><b>Acción propuesta:</b> {proposal.get('action')}</p>
+    <p><b>Costo de esta decisión:</b> ${proposal.get('estimated_cost_usd', 0):.6f}
+    <span style="color:#74807a;font-size:12.5px"> ({proposal.get('tokens_in', 0)} tokens in / {proposal.get('tokens_out', 0)} tokens out, Claude Sonnet 4.6)</span></p>
     <details open><summary>Razonamiento completo de Bedrock</summary>
     <pre>{proposal.get('proposal_text','')}</pre></details>
     <form method="POST" action="/hitl/review/{token}">
