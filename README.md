@@ -1,123 +1,136 @@
 # SAO Platform — Sovereign Agentic Operations
 
-Autonomous AWS incident response platform. A CloudWatch alarm fires, an AI agent reasons over a full infrastructure knowledge graph, proposes an exact fix, and executes it — only after a human approves via email. All AI inference stays inside your VPC via PrivateLink.
+Autonomous AWS/Kubernetes incident response. A real alarm fires (CloudWatch or Prometheus), an AI agent reasons over a full infrastructure knowledge graph, proposes an exact fix, and **applies it via a Git commit — never a direct write to AWS**. All AI inference stays inside a zero-egress VPC via PrivateLink.
 
 ![SAO Platform — Sovereign Agentic Operations](images/banner.png)
 
-> **MVP Status:** End-to-end validated through Phase 8. Production-grade incident flow: detection → Bedrock reasoning → HITL email → boto3 execution → precedent registered in Digital Twin. Fully deployed on AWS.
+> **Status:** core reasoning + GitOps remediation loop verified end-to-end against live infrastructure, including Bedrock reasoning in production (not simulated). This repo is the reasoning/execution half of **[SAGA](https://github.com/kratosvil/argocd-gitops-aws)** — the other half is the EKS/ArgoCD cluster it remediates. Full module-by-module status: [`estado.md`](https://github.com/kratosvil/contexts-repo) (private) / architecture map in `infra-map.md`.
 
 ---
 
 ## How It Works
 
 ```
-CloudWatch Alarm fires
-       │
-       ▼ EventBridge rule
-Lambda Dispatcher
+Prometheus alert fires (e.g. SagaPodCrashLooping)
+       │ Alertmanager webhook
+       ▼
+Lambda dispatcher (outside any VPC)
        │ POST /incident
        ▼
-MCP Server (ECS Fargate / FastAPI)
-       ├── Load Digital Twin from S3
-       │     ├── Topology (nodes + edges from Terraform state)
-       │     ├── Governance (denied actions, compliance rules)
-       │     ├── Precedents (past incidents + embeddings — RAG)
-       │     └── Constraints (maintenance windows, forbidden ops)
-       │
-       ├── Query CloudWatch in real-time
-       │     ├── Current alarm state
-       │     └── Recent Lambda logs (last 5 min)
-       │
-       ├── Build semantic query embedding (Titan Embeddings)
-       │   Retrieve similar precedents via cosine similarity
-       │
-       ├── Call Amazon Bedrock (Claude Sonnet — cross-region inference)
+mcp_server (ECS Fargate / FastAPI, INSIDE a zero-egress VPC)
+       ├── Load Digital Twin from S3 (topology, governance, precedents, constraints)
+       ├── Query CloudWatch in real time
+       ├── If the alarm is a known one: ask the HITL Lambda for the real git
+       │   history of the manifest that controls the deployment (mcp_server
+       │   cannot reach GitHub itself — see "Zero-egress" below)
+       ├── Call Amazon Bedrock via PrivateLink (Claude Sonnet 4.6)
        │   → ROOT_CAUSE / FIX / RISK / REASON / ACTION
-       │
-       ├── Save proposal to S3 (proposals/{token}.json)
-       │
-       └── Publish SNS email:
-             Proposal + APPROVE link + REJECT link
+       ├── Capture real token usage from the response, compute cost
+       ├── Decide decision_state BY CODE, never by the model's self-reported
+       │   RISK — only argocd_rollback_via_git on the dev overlay qualifies
+       │   for auto_execute; everything else escalates to a human
+       └── Save the proposal to S3, notify (email + console)
 
-Operator clicks APPROVE
-       │ API Gateway GET /hitl/approve?token=<uuid>
+If auto_execute: mcp_server invokes the HITL Lambda itself (no human click)
+If escalate: a human approves from the email link OR the console
+       │
        ▼
-Lambda HITL Executor
-       ├── Load proposal from S3
-       ├── Execute boto3 action (Lambda / ECS / RDS)
-       ├── Register precedent in Digital Twin
-       │     ├── Titan embedding of incident+outcome
-       │     └── Written back to Digital Twin S3 JSON
-       └── SNS email: confirmation of execution
+Lambda HITL (outside the VPC — this is the only component with real
+internet egress; it's the GitHub proxy for the isolated reasoner)
+       ├── Opens a Pull Request in the private GitOps manifests repo
+       │   (NEVER writes to `main` directly)
+       └── Serves a minimal review console (/hitl/pending, /hitl/review/{token})
+           where a human can approve as-is or adjust a parameter first
 
-Total time: alarm → fix executed < 10 minutes
+The PR must pass CI (dry-run + OPA policy + Trivy + Gitleaks) before it can
+merge. If auto_execute, a poller Lambda merges it automatically once CI is
+green — otherwise a human merges by hand.
+
+ArgoCD syncs the merge → cluster returns to healthy.
+
+The poller then confirms against real Prometheus data (not "it merged") that
+the alert actually cleared, and only then opens a NEW pull request with an
+auto-generated guardrail policy that prevents the same failure from
+recurring — this one ALWAYS requires human approval, no exceptions.
 ```
 
 ---
 
-## Architecture
+## Why GitOps, not direct AWS writes
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  PRIVATE VPC  (zero-egress — Bedrock via PrivateLink)           │
-│                                                                  │
-│  terraform apply → S3 (tfstate)                                 │
-│         │                                                        │
-│         ▼ S3 event                                               │
-│  ┌──────────────────────┐                                       │
-│  │  Lambda Collector    │  Reads tfstate → extracts nodes/edges │
-│  │                      │  Updates Digital Twin topology in S3  │
-│  └──────────┬───────────┘                                       │
-│             │ writes sao/digital_twin.json (KMS encrypted)      │
-│             ▼                                                    │
-│  ┌──────────────────────┐   PrivateLink    ┌──────────────────┐ │
-│  │  MCP Server          │ ◄──────────────► │  Amazon Bedrock  │ │
-│  │  ECS Fargate/FastAPI │  (no internet)   │  Claude Sonnet   │ │
-│  │                      │                  └──────────────────┘ │
-│  │  POST /incident      │                  ┌──────────────────┐ │
-│  │  GET  /debug/context │ ◄──────────────► │  Titan Embeddings│ │
-│  │  POST /debug/prompt  │                  │  (RAG — Phase 8) │ │
-│  └──────────┬───────────┘                  └──────────────────┘ │
-│             │                                                    │
-│             ▼ proposals/{token}.json                            │
-│  ┌──────────────────────┐                                       │
-│  │  S3 Graph Store      │  Digital Twin + Proposals             │
-│  │  (KMS + Versioning)  │  <your-graph-bucket>                 │
-│  └──────────────────────┘                                       │
-│                                                                  │
-│  SNS email → APPROVE/REJECT links → API Gateway                 │
-│         │                                                        │
-│         ▼                                                        │
-│  ┌──────────────────────┐                                       │
-│  │  Lambda HITL         │  Reads proposal → executes boto3      │
-│  │  Executor            │  Registers precedent + embedding      │
-│  └──────────────────────┘                                       │
-│                                                                  │
-│  Every action: CloudTrail → S3 WORM + KMS (immutable audit)    │
-└─────────────────────────────────────────────────────────────────┘
-```
+The original MVP of this project executed approved fixes directly via boto3 (`lambda:UpdateFunctionConfiguration`, `ecs:UpdateService`, `rds:RebootDBInstance` — the code for these is still in `lambda-hitl/handler.py`, kept intentionally as evidence). That model has a real weakness: it has no audit trail beyond CloudTrail, no policy gate on the change's *content*, and no natural place to leave a guardrail behind.
+
+This repo now fuses with **[SAGA](https://github.com/kratosvil/argocd-gitops-aws)**: the agent's only write path is a Pull Request against a GitOps-managed manifests repo. Every fix is reviewable diff, gated by CI (OPA/Trivy/Gitleaks) before it can merge, and ArgoCD — not the agent — is what actually touches the cluster. The IAM role that reasons about the incident has **zero AWS write permissions**, verified with a real negative test (`AccessDeniedException` captured on a direct write attempt).
 
 ---
 
-## The Digital Twin — Core Innovation
+## Zero-egress and the GitHub-proxy pattern
 
-Not a list of resources. A **living knowledge graph** with 5 layers that enables zero-hallucination AI reasoning:
+`mcp_server` runs in a VPC with `enable_nat_gateway = false` — no NAT, no route to the public internet, only VPC Interface Endpoints to Bedrock, ECR, CloudWatch, STS, Lambda, and an S3 Gateway endpoint. This is a real constraint, not just a diagram: when the reasoner needed the real git history of a manifest to ground its proposal (see "The context bug" below), it could not call GitHub or Secrets Manager directly — both attempts hung/failed.
+
+The fix reuses a pattern already established for auto-approval: `mcp_server` invokes the **HITL Lambda** (which does have internet egress — it is not inside any VPC) via `lambda:InvokeFunction`, using a direct-invoke event shape distinct from its API Gateway–triggered requests. The HITL Lambda already holds the GitHub PAT and already talks to GitHub to open PRs, so it doubles as a read-only proxy for the isolated reasoner. No new secret, no new IAM grant beyond a permission that already existed.
+
+---
+
+## The context bug (real finding, not hypothetical)
+
+The first time this system reasoned live about a real Kubernetes incident (every earlier test had the decision hand-simulated to avoid paying for Fargate on every run), Bedrock returned `ACTION: none` — not a bug in the model, a real gap in what it was given: CloudWatch had nothing (the alert is Prometheus-native, not a CloudWatch Alarm), the log-group lookup targeted a Lambda naming convention against a Kubernetes pod, and there were zero RAG precedents for this exact scenario yet. Without any of the three, the model correctly declined to guess a target git SHA.
+
+Fixed by adding a fourth context source: the real commit history of the manifest path, with an explicit instruction to pick the most recent revision whose tag differs from the currently-deployed one. Verified end to end with a real incident: Bedrock proposed the exact correct SHA, the fix auto-merged, the cluster came back healthy.
+
+---
+
+## The Digital Twin
+
+Not a list of resources. A **living knowledge graph** with 5 layers:
 
 | Layer | Contents | Source | Updated |
 |-------|----------|--------|---------|
 | **Topology** | Nodes (resources) + edges (dependencies) | `terraform.tfstate` | Every `terraform apply` |
 | **Governance** | Denied actions, compliance frameworks, mandatory tags | Static config | Manual |
 | **Dynamic State** | Active alarms, CloudWatch metrics, agent locks | CloudWatch (real-time) | At incident time |
-| **Precedents** | History of every remediation + outcome + Titan embedding | Lambda HITL (post-execution) | After each approved fix |
+| **Precedents** | History of every remediation + outcome + Titan embedding | HITL Lambda (post-execution) | After each resolved fix |
 | **Constraints** | Maintenance windows, forbidden ops by schedule | Static config | Manual |
 
-**Why this matters:** when Bedrock proposes a fix, it sees the exact network topology, knows which actions are governance-blocked, and retrieves semantically similar past incidents via RAG. Impossible or dangerous proposals are structurally prevented, not prompt-engineered away.
+Precedents now distinguish what the AI proposed from what a human actually approved when a reviewer adjusted a parameter before approving (see "Review console" below) — the RAG layer learns from the correction, not just the raw suggestion.
 
 ---
 
-## Semantic RAG on Precedents (Phase 8)
+## Review console — approve, reject, or adjust before approving
 
-After each approved and executed fix, the Lambda HITL Executor registers a precedent with a vector embedding:
+Beyond the original single-use email links (`/hitl/approve`, `/hitl/reject` — still work exactly as before), a small console runs on the same Lambda/API Gateway/S3, with no external tool or paid platform:
+
+| Route | What it does |
+|---|---|
+| `GET /hitl/pending` | Lists proposals waiting on a human, with the real cost of each |
+| `GET /hitl/review/{token}` | Full Bedrock reasoning + an editable form of the proposed action's parameters |
+| `POST /hitl/review/{token}` | Approves with the original values or with a human-adjusted value (e.g. overriding which git revision to revert to), or rejects |
+
+Guarded by a bearer token (SSM SecureString, generated by Terraform — never hardcoded, never printed). The single-use email links don't need this (secure by possession); a route that lists *every* pending proposal in one URL does.
+
+---
+
+## Cost — captured per decision, not estimated
+
+Every Bedrock call's real `usage.input_tokens`/`output_tokens` is captured from the response (previously discarded unread) and priced against Claude Sonnet 4.6's on-demand Bedrock rate (**$3 / $15 per million input/output tokens**, verified 2026-08-13). The result is stored on the proposal and shown in the console — a per-incident real number, not a projected estimate.
+
+This is intentionally the *minimal* slice of cost governance: no cross-incident ledger, no dedup, no budget-enforcement gate yet — those are a documented next phase (dedup/rate-limiting is already a known gap: an alert storm can currently trigger the same proposal multiple times from unrelated alarms; a quick mitigation — scoping which alarms get grounding context — is in place, the structural fix is not).
+
+---
+
+## Decision gate — three states, decided by code
+
+| `decision_state` | When | What happens |
+|---|---|---|
+| `auto_execute` | Action is `argocd_rollback_via_git` targeting the dev overlay specifically | PR opens and merges with zero human interaction, provided CI passes |
+| `escalate` | Anything else — prod, base manifests, any other action, or the model returning `none` | Waits for a human, via email or the console |
+| *(guardrails)* | Always, no exception | The eradication-phase policy PR generated after a confirmed fix never auto-merges, regardless of the risk of the fix it followed |
+
+The model's own self-reported `RISK: LOW/MEDIUM/HIGH` is informational only — it is never what drives auto-execution. That decision is made deterministically from the action name and its parameters.
+
+---
+
+## Semantic RAG on Precedents
 
 ```
 incident query → Titan Embeddings (amazon.titan-embed-text-v1, 1536 dims)
@@ -127,7 +140,7 @@ incident query → Titan Embeddings (amazon.titan-embed-text-v1, 1536 dims)
               top-k most similar past incidents injected into Bedrock context
 ```
 
-Validated: `similarity_score=0.8484` on same-type incident replay. The system gets smarter with every resolved incident without retraining.
+The system gets smarter with every resolved incident without retraining — and, as of the review console, learns from human corrections specifically, not just raw AI proposals.
 
 ---
 
@@ -136,17 +149,18 @@ Validated: `similarity_score=0.8484` on same-type incident replay. The system ge
 | Layer | Technology |
 |-------|------------|
 | IaC | Terraform >= 1.5, S3 remote backend |
-| Graph Store | S3 — JSON-LD, KMS encryption + versioning |
+| Graph Store | S3 — JSON, KMS encryption + versioning |
 | AI Reasoning | Amazon Bedrock — `us.anthropic.claude-sonnet-4-6` (cross-region inference) |
 | RAG | Amazon Titan Embeddings v1 (1536 dims) + cosine similarity (Python) |
-| AI Transport | VPC Interface Endpoint — Bedrock never touches internet |
+| AI Transport | VPC Interface Endpoint — Bedrock never touches the public internet |
 | Agent Compute | ECS Fargate — serverless containers, scales to zero |
 | HTTP Framework | FastAPI — async incident handler |
-| HITL Gateway | SNS email + API Gateway + Lambda executor |
+| Remediation Write Path | GitHub Pull Request → CI (OPA/Trivy/Gitleaks) → ArgoCD sync — never a direct AWS write |
+| HITL | Email (SNS) + a minimal review console, same Lambda/API Gateway |
 | Topology Source | `terraform.tfstate` auto-parsed on every apply |
-| Event Trigger | CloudWatch Alarms + EventBridge |
-| Audit | CloudTrail — S3 WORM + KMS |
-| IAM | Least-privilege — no IAM write, no billing, no root |
+| Event Trigger | Prometheus/Alertmanager (Kubernetes incidents) + CloudWatch Alarms/EventBridge (legacy AWS-native path, code intact, IAM-blocked) |
+| Audit | CloudTrail — S3 WORM + KMS; every GitOps change is also a reviewable diff in Git history |
+| IAM | Least-privilege — reasoning role is read-only, verified with a negative test |
 
 ---
 
@@ -155,54 +169,36 @@ Validated: `similarity_score=0.8484` on same-type incident replay. The system ge
 ```
 sao-platform/
 ├── mcp-server/
-│   ├── app.py                     # FastAPI HTTP server — incident handler, Bedrock, HITL flow
-│   ├── server.py                  # MCP server — 4 tools (sao_load_context, etc.)
-│   ├── config.py                  # Environment-based config
-│   ├── context_map/
-│   │   ├── schema.py              # DigitalTwin + all layer models (Pydantic)
-│   │   ├── store.py               # S3 read/write for the graph
-│   └── └── query.py               # Topology traversal + semantic precedent retrieval
-│   └── resources/
-│       ├── base.py                # ResourcePlugin interface
-│       ├── lambda_.py             # LambdaPlugin — timeout / memory / concurrency
-│       └── ecs.py                 # ECSPlugin — scale / force-deploy
-├── lambda-collector/
-│   ├── handler.py                 # Lambda entry point — fires on S3 event (new tfstate)
-│   └── collectors/
-│       ├── tfstate.py             # Parses tfstate → nodes + edges
-│       └── cloudwatch.py         # Fetches metrics + active alarms
+│   ├── app.py                     # FastAPI HTTP server — the reasoner (deployed, ECS Fargate)
+│   ├── server.py                  # A real MCP protocol server (FastMCP, 4 tools) — NOT
+│   │                               # currently wired into the live pipeline, kept as an
+│   │                               # earlier design; app.py is what's actually deployed
+│   ├── config.py                  # Environment-based config, incl. Bedrock pricing + which
+│   │                               # alarms get git-history grounding context
+│   ├── context_map/                 # Digital Twin schema, S3 store, graph query + RAG
+│   └── resources/                   # Legacy resource plugins (Lambda/ECS) — IAM-blocked
 ├── lambda-hitl/
-│   └── handler.py                 # HITL executor — approve/reject, boto3, precedent registration
+│   └── handler.py                 # Executor + GitHub proxy for the isolated reasoner +
+│                                     the review console (Módulo 10)
+├── lambda-hitl-poller/
+│   └── handler.py                 # EventBridge, every 1 min: merges auto_execute PRs once
+│                                     CI is green, confirms loop closure against real
+│                                     Prometheus data, generates guardrails
+├── lambda-collector/               # Parses tfstate → Digital Twin topology on every apply
 ├── terraform/
-│   ├── versions.tf                # Provider + remote backend
-│   ├── variables.tf               # All inputs (no hardcoded values)
-│   ├── main.tf                    # S3 + Lambda Collector + EventBridge
+│   ├── networking.tf              # Zero-egress VPC — no NAT, no IGW
+│   ├── vpc_endpoints.tf           # Bedrock/ECR/CloudWatch/STS/Lambda PrivateLink + S3 Gateway
 │   ├── ecs.tf                     # ECS Fargate cluster + task definition + ALB
-│   ├── hitl.tf                    # API Gateway + Lambda HITL
-│   ├── iam.tf                     # IAM roles + least-privilege policies
-│   ├── networking.tf              # VPC + subnets + security groups
-│   ├── vpc_endpoints.tf           # 8 VPC Interface endpoints (Bedrock, ECR, S3, etc.)
-│   ├── alarms.tf                  # CloudWatch alarms + EventBridge rules
-│   ├── ecr.tf                     # ECR repository
-│   ├── outputs.tf
-│   ├── backend.tfbackend.example  # Copy → backend.tfbackend (gitignored)
-│   └── terraform.tfvars.example   # Copy → terraform.tfvars (gitignored)
+│   ├── hitl.tf                    # API Gateway (approve/reject/pending/review routes),
+│   │                               # HITL + poller Lambdas, SSM console token
+│   ├── argocd_rollback.tf         # The GitOps PAT secret (value loaded manually, never in code)
+│   ├── iam.tf / ecr.tf / main.tf / alarms.tf / outputs.tf / variables.tf
+│   └── backend.tfbackend.example / terraform.tfvars.example
 └── docs/
-    ├── digital_twin_schema.json   # Full Digital Twin schema reference
-    ├── context-map.md             # Internals: data model, GraphQuery, RAG flow, plugin system
-    └── extending-digital-twin.md  # Guide: adding new AWS resource types
+    ├── digital_twin_schema.json
+    ├── context-map.md
+    └── extending-digital-twin.md
 ```
-
----
-
-## MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `sao_load_context` | Loads full Digital Twin context for an incident node |
-| `sao_validate_action` | Checks governance + node lock before executing any action |
-| `sao_execute_action` | Executes approved action via resource plugin, writes precedent |
-| `sao_graph_status` | Current Digital Twin summary (nodes, edges, locks, precedent count) |
 
 ---
 
@@ -211,291 +207,56 @@ sao-platform/
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check |
-| `POST` | `/incident` | Main incident handler — full Bedrock + HITL flow |
+| `POST` | `/incident` | Main incident handler — full Bedrock + decision-gate flow |
 | `GET` | `/debug/context/{node_id}` | Digital Twin context for a node (no Bedrock call) |
-| `POST` | `/debug/prompt` | Full prompt that would be sent to Bedrock (no Bedrock call) |
-
----
-
-## HITL Actions
-
-All actions executed by the Lambda HITL Executor after operator approval:
-
-| Action | Parameters | AWS Call |
-|--------|------------|----------|
-| `lambda_update_timeout` | `function_name`, `timeout` | `update_function_configuration` |
-| `lambda_update_memory` | `function_name`, `memory_size` | `update_function_configuration` |
-| `lambda_update_reserved_concurrency` | `function_name`, `reserved_concurrent_executions` | `put_function_concurrency` |
-| `ecs_restart_service` | `cluster`, `service` | `update_service(forceNewDeployment=True)` |
-| `ecs_update_desired_count` | `cluster`, `service`, `desired_count` | `update_service` |
-| `rds_reboot_instance` | `db_instance_identifier` | `reboot_db_instance` |
-| `none` | `reason` | No action — log only |
-
----
-
-## Risk Policy
-
-| Risk Level | Examples | Approval |
-|------------|----------|---------|
-| `LOW` | Lambda timeout/memory update | Auto-approved |
-| `MEDIUM` | ECS force-new-deployment, Lambda concurrency | On-call engineer |
-| `HIGH` | RDS operations, service stop | Manager approval |
+| `POST` | `/debug/prompt` | Full prompt that would be sent to Bedrock, incl. git history (no Bedrock call) |
+| `GET` | `/hitl/approve`, `/hitl/reject` | Single-use links from the email notification |
+| `GET` | `/hitl/pending` | Console: list proposals waiting on a human (bearer token required) |
+| `GET`/`POST` | `/hitl/review/{token}` | Console: view reasoning, approve as-is or adjusted, or reject |
 
 ---
 
 ## Security
 
 ```
-Layer 1 — Network:      Zero-egress VPC, Bedrock + ECR via PrivateLink — no NAT, no IGW
-Layer 2 — IAM:          Least privilege — no IAM write, no billing, no root access
-Layer 3 — Governance:   Denied actions in Digital Twin — agent cannot override policy
-Layer 4 — HITL:         MEDIUM + HIGH risk → human approval required before execution
-Layer 5 — Audit:        CloudTrail WORM — immutable, every action tied to proposal token
-Layer 6 — Agent Locks:  Digital Twin locks node during execution — no concurrent agents
-Layer 7 — Secrets:      Credentials via SSM Parameter Store — never in code or tfvars
-Layer 8 — Idempotency:  Proposals have status (pending/executed/rejected/failed) — one-time execution
+Layer 1 — Network:      Zero-egress VPC for the reasoner — no NAT, no IGW, PrivateLink only
+Layer 2 — IAM:          Reasoning role is read-only, verified with a real negative test
+Layer 3 — Write path:   The only way to change anything is a GitOps Pull Request —
+                          never a direct AWS API call
+Layer 4 — CI gate:      OPA policy + Trivy (IaC misconfig) + Gitleaks (secrets) on every PR
+Layer 5 — HITL:         Anything outside the single narrow auto_execute case escalates
+                          to a human, via email or the console
+Layer 6 — Console auth: Bearer token (SSM SecureString) gates the routes that list/act on
+                          ALL pending proposals — single-use links don't need it
+Layer 7 — Guardrails:   Auto-generated policies from resolved incidents NEVER auto-merge,
+                          regardless of the risk of the fix that produced them
+Layer 8 — Audit:        Every GitOps change is a reviewable Git diff; CloudTrail covers
+                          the rest; proposals have explicit status (pending/executed/
+                          rejected/failed) — one-time execution
 ```
+
+**Known gaps, tracked, not hidden:** Semgrep (SAST) was planned but never wired into CI — only Trivy + Gitleaks run today. Telemetry fed into the Bedrock prompt is not sanitized against injection (mitigated by the deterministic code gate, not eliminated). Branch protection isn't enforced as a hard gate (GitHub tier limitation on private repos) — it's process discipline, documented as such. Full list: `estado.md`.
 
 ---
 
-## AWS Resources (Deployed MVP)
+## AWS Resources (deployed, torn down between sessions)
 
 | Resource | Name |
 |----------|------|
-| S3 (graph + proposals) | `<account-id>-sao-graph-<account-id>` (set in `terraform.tfvars`) |
+| S3 (graph + proposals) | `<account-id>-sao-graph-<account-id>` |
 | Lambda Collector | `sao-lambda-collector` |
-| Lambda Dispatcher | `sao-alarm-dispatcher` |
+| Lambda Dispatcher (Prometheus path) | `saga-alertmanager-dispatcher` |
+| Lambda Dispatcher (CloudWatch path, legacy) | `sao-alarm-dispatcher` |
 | Lambda HITL | `sao-lambda-hitl` |
-| API Gateway | `https://<api-id>.execute-api.<region>.amazonaws.com` |
-| EventBridge Rule | `sao-cw-alarm-trigger` |
-| ECS Cluster | `sao-platform-cluster` |
-| ECS Service | `sao-platform-service` |
+| Lambda Poller | `sao-lambda-hitl-poller` |
+| API Gateway (HITL + console) | `https://<api-id>.execute-api.<region>.amazonaws.com` |
+| ECS Cluster / Service | `sao-platform-cluster` / `sao-platform-service` |
 | ALB | `sao-platform-alb-<id>.<region>.elb.amazonaws.com` |
 | ECR | `<account-id>.dkr.ecr.<region>.amazonaws.com/sao-mcp-server` |
 | SNS Topic | `sao-platform-alarms` (KMS encrypted) |
-| VPC Endpoints | 8 Interface endpoints + S3 Gateway |
-
----
-
-## Estimated Cost per Incident
-
-| Component | Tokens | Cost |
-|-----------|--------|------|
-| Digital Twin context (static, prompt cache eligible) | ~22,000 | ~$0.007 |
-| Dynamic state + CloudWatch context | ~11,000 | ~$0.033 |
-| Claude Sonnet response | ~3,500 | ~$0.053 |
-| **Total per incident** | **~36,500** | **~$0.093** |
-
-Infrastructure (ECS Fargate + VPC Endpoints): ~$0.19/hr — **tear down when not in demo**.
-
-50 incidents/month ≈ **$4.65 in AI tokens**.
-
----
-
-## Development Operations
-
-```bash
-# Build and deploy MCP Server image
-make docker-deploy
-
-# Rebuild Lambda Collector ZIP
-make build-collector
-
-# Fix ECS service pointing to wrong task definition (run after terraform apply)
-make fix-taskdef
-
-# Trigger a test alarm (OK → ALARM)
-make run_script
-
-# View proposals in S3
-make list-proposals
-make show-proposal TOKEN=<uuid>
-
-# View logs
-make logs-dispatcher
-make logs-mcp
-
-# Validate RAG mode and precedents
-make debug-rag
-```
-
----
-
-## Deploying from Scratch
-
-### Prerequisites
-
-| Tool | Version | Notes |
-|------|---------|-------|
-| Python | >= 3.12 | For local dev and Lambda packaging |
-| Terraform | >= 1.5 | Remote backend required (S3 + DynamoDB) |
-| AWS CLI v2 | latest | Configured with credentials for the target account |
-| Docker | latest | For building and pushing the MCP Server image |
-| Amazon Bedrock | — | Must request access to: Claude Sonnet (`us.anthropic.claude-sonnet-4-6`) and Titan Embeddings (`amazon.titan-embed-text-v1`) in us-east-1 |
-
-> Bedrock model access can take up to 24h. Request it before starting the deploy.
-
-### Step 1 — Configure
-
-```bash
-git clone https://github.com/kratosvil/sao-platform.git
-cd sao-platform
-
-cp terraform/backend.tfbackend.example terraform/backend.tfbackend
-cp terraform/terraform.tfvars.example  terraform/terraform.tfvars
-```
-
-Edit `terraform/backend.tfbackend` — set your S3 bucket, DynamoDB table, and region for Terraform state storage.
-
-Edit `terraform/terraform.tfvars` — all values are documented inline. The critical ones:
-
-| Variable | What to set |
-|----------|-------------|
-| `graph_bucket_name` | New unique S3 bucket name (Terraform creates it) |
-| `tfstate_bucket_name` | Existing S3 bucket where your tfstate lives |
-| `operator_email` | Email that receives APPROVE/REJECT HITL links |
-| `bedrock_model_id` | Must be `us.anthropic.claude-sonnet-4-6` — see note below |
-| `tfstate_kms_key_arn` | Only if your tfstate bucket uses SSE-KMS |
-
-### Step 2 — Deploy infrastructure
-
-```bash
-cd terraform
-terraform init -backend-config=backend.tfbackend
-terraform plan -var-file=terraform.tfvars   # review before applying
-terraform apply -var-file=terraform.tfvars
-cd ..
-```
-
-After `terraform apply`, check the outputs — you will need the ALB DNS name and API Gateway URL.
-
-### Step 3 — Confirm SNS email subscription
-
-AWS sends a confirmation email to `operator_email` after the SNS topic is created.
-**You must click "Confirm subscription" in that email before HITL works.**
-Without this step, no APPROVE/REJECT notifications will be delivered.
-
-### Step 4 — Build and push the MCP Server image
-
-```bash
-make docker-deploy
-```
-
-This builds the Docker image, pushes it to ECR, and forces a new ECS deployment.
-
-### Step 5 — Point ECS to the correct task definition
-
-```bash
-make fix-taskdef
-```
-
-The ECS module has `ignore_changes = [task_definition]` — the service starts pointing to the first revision (which has no env vars). This command updates it to the latest revision with all env vars injected. **This step is mandatory after every `terraform apply` that changes env vars.**
-
-### Step 6 — Build and deploy the Lambda Collector
-
-```bash
-make build-collector
-
-aws lambda update-function-code \
-  --function-name sao-lambda-collector \
-  --zip-file fileb://lambda-collector/collector.zip \
-  --region us-east-1
-```
-
-### Step 7 — Enable EventBridge notifications on the tfstate bucket
-
-The Lambda Collector fires on S3 events from the tfstate bucket. This requires EventBridge notifications to be enabled on that bucket (it is not enabled by default):
-
-```bash
-aws s3api put-bucket-notification-configuration \
-  --bucket <your-tfstate-bucket> \
-  --notification-configuration '{"EventBridgeConfiguration":{}}'
-```
-
-This is a non-destructive operation — it does not touch any existing Lambda/SNS/SQS notifications.
-
-### Step 8 — Build the initial Digital Twin
-
-Trigger the collector manually to create the Digital Twin JSON before the first incident:
-
-```bash
-aws lambda invoke \
-  --function-name sao-lambda-collector \
-  --payload '{"source":"manual"}' \
-  --region us-east-1 \
-  /tmp/out.json && cat /tmp/out.json
-```
-
-Expected output: `{"statusCode": 200, "body": {"nodes_updated": N, "edges_updated": M, ...}}`
-
-### Step 9 — Verify and test
-
-```bash
-# Verify the Digital Twin was built
-make debug-rag
-
-# Verify the MCP Server is healthy
-curl http://<your-alb-dns>/health
-
-# Run a full end-to-end test (triggers a demo alarm)
-make run_script
-```
-
----
-
-## Operations Runbook
-
-### After every `terraform apply`
-
-```bash
-# Always run this — ECS module ignores task_definition changes
-make fix-taskdef
-
-# If Lambda Collector code changed
-make build-collector
-aws lambda update-function-code \
-  --function-name sao-lambda-collector \
-  --zip-file fileb://lambda-collector/collector.zip \
-  --region us-east-1
-```
-
-### After a HITL-approved fix executes
-
-The HITL executor changes AWS resources directly via boto3 (e.g., Lambda memory size). This creates **IaC drift** — Terraform does not know about the change. To fix:
-
-1. Check what changed in the executed proposal: `make show-proposal TOKEN=<uuid>`
-2. Update the corresponding value in `terraform.tfvars` and the resource block in `main.tf`
-3. Run `terraform plan` — it should show zero changes if the values match
-4. Commit the updated tfvars and tf files to keep IaC in sync
-
-### Demo cycle (cost control)
-
-Infrastructure costs ~$0.19/hr (~$137/month) dominated by VPC Interface Endpoints. Tear down between demos:
-
-```bash
-# Tear down (keeps S3 data — Digital Twin and proposals are preserved)
-cd terraform && terraform destroy -var-file=terraform.tfvars
-
-# Restore for next demo (full redeploy — ~15 min)
-terraform apply -var-file=terraform.tfvars
-make docker-deploy
-make fix-taskdef
-```
-
-The Digital Twin JSON in S3 survives `terraform destroy` because the S3 bucket has versioning enabled and Terraform does not empty it on destroy by default.
-
-### Troubleshooting
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Bedrock `ValidationException: on-demand throughput not supported` | Wrong model ID | Set `bedrock_model_id = "us.anthropic.claude-sonnet-4-6"` in tfvars |
-| HITL email never arrives | SNS subscription not confirmed | Check email inbox for AWS confirmation email and click the link |
-| HITL links in email show `N/A` | ECS task using old task definition (no env vars) | Run `make fix-taskdef` |
-| ECS task exits immediately | Missing env vars in task definition | Run `make fix-taskdef`, then check `make logs-mcp` |
-| Lambda Collector returns `NoSuchKey` on tfstate | Wrong `tfstate_key` in tfvars | Verify the exact S3 key with `aws s3 ls s3://<bucket> --recursive` |
-| Digital Twin has 0 nodes | tfstate bucket EventBridge notifications not enabled | Run Step 7 above |
-| `make docker-deploy` fails on ECR login | AWS credentials expired or wrong region | Run `aws sts get-caller-identity` to verify credentials |
-| Proposals not appearing in S3 | MCP Server cannot write to graph bucket | Check IAM policy `sao-mcp-server-policy` — `s3:PutObject` on bucket |
+| Secrets Manager | `saga/gitops-manifests-token` — GitHub PAT, read-only to the reasoner via a proxy call |
+| SSM Parameter | `/sao/hitl/console-token` — review console bearer token, generated by Terraform |
+| VPC Endpoints | Bedrock, ECR, CloudWatch, STS, Lambda (Interface) + S3 (Gateway) |
 
 ---
 
@@ -510,9 +271,9 @@ The Digital Twin JSON in S3 survives `terraform destroy` because the S3 bucket h
 
 ---
 
-## Relation to aws-sovereign-ops
+## Relation to other projects in this line of work
 
-[aws-sovereign-ops](https://github.com/kratosvil/aws-sovereign-ops) is the v1 proof-of-concept that validated the Lambda remediation flow (4/4 e2e scenarios passed). SAO Platform is the full architectural evolution: the Digital Twin Context Map replaces manual context injection and enables structured, auditable, zero-hallucination reasoning at scale.
+[aws-sovereign-ops](https://github.com/kratosvil/aws-sovereign-ops) was the v1 proof-of-concept that validated the direct-remediation flow. This repo is the reasoning/execution half of **[SAGA](https://github.com/kratosvil/argocd-gitops-aws)** ([manifests repo](https://github.com/kratosvil/saga-gitops-manifests), private) — the fusion that replaced direct AWS writes with a GitOps-native, policy-gated, self-guarding remediation loop.
 
 ---
 
@@ -520,6 +281,5 @@ The Digital Twin JSON in S3 survives `terraform destroy` because the S3 bucket h
 
 [Business Source License 1.1](LICENSE)
 
-Free for internal and non-commercial use.  
-Commercial use requires a license — contact: kratosvill@gmail.com  
-Converts to Apache License 2.0 on 2030-01-01.
+Free for internal and non-commercial use.
+Commercial use requires a license — contact: kratosvill@gmail.com
