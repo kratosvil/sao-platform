@@ -366,7 +366,7 @@ pre{{white-space:pre-wrap;background:#f7f9f7;padding:14px;border-radius:6px;font
 .pill{{font-family:ui-monospace,monospace;font-size:11px;padding:2px 8px;border-radius:99px;background:#e4e9e5}}
 </style></head>
 <body><h2>{title}</h2>{body}
-<hr><small><a href="/hitl/pending">&larr; volver a pendientes</a> &middot; <a href="/hitl/logout">cerrar sesión</a></small></body></html>""",
+<hr><small><a href="/hitl/pending">&larr; volver a pendientes</a> &middot; <a href="/hitl/history">historial</a> &middot; <a href="/hitl/logout">cerrar sesión</a></small></body></html>""",
     }
 
 
@@ -436,6 +436,28 @@ def _list_pending_proposals() -> list:
                 items.append({"token": token, **data})
     items.sort(key=lambda p: p.get("created_at", ""), reverse=True)
     return items
+
+
+def _list_history_proposals(limit: int = 50) -> list:
+    """Historial (Modulo 10c, 2026-08-13): todo lo que YA NO esta pending --
+    resuelto, rechazado, fallido, o en camino de cierre de loop. Complementa
+    _list_pending_proposals, que solo muestra la cola activa y pierde el
+    costo apenas se aprueba/rechaza algo (era la pregunta real de Samir que
+    origino esto: "a donde se va el costo cuando desaparece de pendientes").
+    """
+    items = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=GRAPH_BUCKET, Prefix=PROPOSALS_PREFIX):
+        for obj in page.get("Contents", []):
+            token = obj["Key"][len(PROPOSALS_PREFIX):-len(".json")]
+            try:
+                data = _load_proposal(token)
+            except Exception:
+                continue
+            if data.get("status") != "pending":
+                items.append({"token": token, **data})
+    items.sort(key=lambda p: p.get("resolved_at") or p.get("created_at", ""), reverse=True)
+    return items[:limit]
 
 
 def _reject_proposal(token: str, proposal: dict, now: str) -> tuple:
@@ -673,6 +695,31 @@ def _handle_pending(event: dict) -> dict:
     return _console_page(200, f"Propuestas pendientes ({len(proposals)})", body)
 
 
+def _handle_history(event: dict) -> dict:
+    unauth = _require_console_auth(event)
+    if unauth:
+        return unauth
+    proposals = _list_history_proposals()
+    if not proposals:
+        body = "<p>Todavía no hay propuestas resueltas.</p>"
+    else:
+        total_cost = sum(p.get("estimated_cost_usd", 0) for p in proposals)
+        rows = "".join(
+            f"<tr><td>{p.get('alarm_name','')}</td><td><span class=\"pill\">{p.get('status','')}</span></td>"
+            f"<td>{p.get('action','')}</td><td>${p.get('estimated_cost_usd', 0):.6f}</td>"
+            f"<td>{(p.get('resolved_at') or p.get('created_at',''))[:19]}</td>"
+            f"<td><a class=\"btn approve\" href=\"/hitl/review/{p['token']}\">Ver</a></td></tr>"
+            for p in proposals
+        )
+        body = (
+            f"<table><tr><th>Alarma</th><th>Resultado</th><th>Acción</th><th>Costo (Bedrock)</th><th>Resuelta</th><th></th></tr>{rows}</table>"
+            f"<p style=\"margin-top:14px;font-size:13px;color:#74807a\">Costo total de estas {len(proposals)} propuestas resueltas: "
+            f"<b style=\"color:#16211d\">${total_cost:.6f}</b> — historial simple (últimas 50), todavía sin ledger "
+            f"acumulado real ni filtro por fecha (Módulo 12 completo, backlog).</p>"
+        )
+    return _console_page(200, f"Historial ({len(proposals)})", body)
+
+
 def _handle_review_get(event: dict) -> dict:
     unauth = _require_console_auth(event)
     if unauth:
@@ -682,8 +729,34 @@ def _handle_review_get(event: dict) -> dict:
         proposal = _load_proposal(token)
     except Exception:
         return _console_page(404, "No encontrada", "<p>No existe esa propuesta.</p>")
+
+    header = f"""
+    <p><b>Alarma:</b> {proposal.get('alarm_name')} &nbsp;
+    <b>Recurso:</b> {proposal.get('node_id')} &nbsp;
+    <b>Riesgo (IA):</b> <span class="pill">{proposal.get('risk_level')}</span></p>
+    <p><b>Acción propuesta:</b> {proposal.get('action')}</p>
+    <p><b>Costo de esta decisión:</b> ${proposal.get('estimated_cost_usd', 0):.6f}
+    <span style="color:#74807a;font-size:12.5px"> ({proposal.get('tokens_in', 0)} tokens in / {proposal.get('tokens_out', 0)} tokens out, Claude Sonnet 4.6)</span></p>
+    <details open><summary>Razonamiento completo de Bedrock</summary>
+    <pre>{proposal.get('proposal_text','')}</pre></details>
+    """
+
+    # Ya procesada (viene del historial, Modulo 10c) -- misma pagina mostrando
+    # el detalle completo, pero de solo lectura, sin form de aprobar/rechazar.
     if proposal.get("status") != "pending":
-        return _console_page(409, "Ya procesada", f"<p>Estado actual: <b>{proposal.get('status')}</b></p>")
+        action_params = proposal.get("action_params", {})
+        approved_params = proposal.get("approved_params")
+        adjusted = approved_params is not None and approved_params != action_params
+        extra = (
+            f"<p><b>Parámetros ajustados por el humano antes de aprobar:</b> <code>{approved_params}</code></p>"
+            if adjusted else ""
+        )
+        body = header + f"""
+        <p><b>Estado final:</b> <span class="pill">{proposal.get('status')}</span>
+        &nbsp; <span style="color:#74807a;font-size:12.5px">{(proposal.get('resolved_at') or '')[:19]}</span></p>
+        {extra}
+        """
+        return _console_page(200, f"Revisar — {proposal.get('alarm_name')} (ya procesada)", body)
 
     action_params = proposal.get("action_params", {})
     # Form generico: un campo de texto por cada parametro de la accion
@@ -694,15 +767,7 @@ def _handle_review_get(event: dict) -> dict:
         f'<label>{k}<br><input type="text" name="{k}" value="{urllib.parse.quote(str(v))}"></label>'
         for k, v in action_params.items()
     )
-    body = f"""
-    <p><b>Alarma:</b> {proposal.get('alarm_name')} &nbsp;
-    <b>Recurso:</b> {proposal.get('node_id')} &nbsp;
-    <b>Riesgo (IA):</b> <span class="pill">{proposal.get('risk_level')}</span></p>
-    <p><b>Acción propuesta:</b> {proposal.get('action')}</p>
-    <p><b>Costo de esta decisión:</b> ${proposal.get('estimated_cost_usd', 0):.6f}
-    <span style="color:#74807a;font-size:12.5px"> ({proposal.get('tokens_in', 0)} tokens in / {proposal.get('tokens_out', 0)} tokens out, Claude Sonnet 4.6)</span></p>
-    <details open><summary>Razonamiento completo de Bedrock</summary>
-    <pre>{proposal.get('proposal_text','')}</pre></details>
+    body = header + f"""
     <form method="POST" action="/hitl/review/{token}">
       {fields}
       <p>
@@ -779,6 +844,8 @@ def handler(event, context):
     # Modulo 10: rutas de consola -- todas requieren CONSOLE_TOKEN_PARAM.
     if raw_path == "/hitl/pending" and method == "GET":
         return _handle_pending(event)
+    if raw_path == "/hitl/history" and method == "GET":
+        return _handle_history(event)
     if raw_path.startswith("/hitl/review/") and method == "GET":
         return _handle_review_get(event)
     if raw_path.startswith("/hitl/review/") and method == "POST":

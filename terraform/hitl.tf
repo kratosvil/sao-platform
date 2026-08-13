@@ -197,6 +197,14 @@ resource "aws_apigatewayv2_route" "logout" {
   target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
 }
 
+# Modulo 10c (2026-08-13): historial de propuestas ya resueltas/rechazadas,
+# con costo -- /hitl/pending pierde esa info apenas se aprueba/rechaza algo.
+resource "aws_apigatewayv2_route" "history" {
+  api_id    = aws_apigatewayv2_api.hitl.id
+  route_key = "GET /hitl/history"
+  target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
+}
+
 resource "aws_apigatewayv2_stage" "hitl_default" {
   api_id      = aws_apigatewayv2_api.hitl.id
   name        = "$default"
