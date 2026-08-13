@@ -1,3 +1,18 @@
+# Modulo 10 (2026-08-13): token compartido para las rutas de consola
+# (/hitl/pending, /hitl/review/*) -- generado por Terraform, nunca pasa por
+# el chat/Claude. Recuperar con:
+#   terraform output -raw hitl_console_token
+resource "random_password" "hitl_console_token" {
+  length  = 32
+  special = false
+}
+
+resource "aws_ssm_parameter" "hitl_console_token" {
+  name  = "/sao/hitl/console-token"
+  type  = "SecureString"
+  value = random_password.hitl_console_token.result
+}
+
 # Lambda HITL executor — aprueba/rechaza propuestas del agente
 data "archive_file" "hitl" {
   type        = "zip"
@@ -54,6 +69,14 @@ resource "aws_iam_role_policy" "hitl" {
         Action   = ["sns:Publish"]
         Resource = aws_sns_topic.alarms.arn
       },
+      {
+        # Módulo 10: verifica el bearer token de las rutas de consola contra
+        # este parámetro -- solo lectura, el valor lo genera Terraform.
+        Sid      = "ReadConsoleToken"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = aws_ssm_parameter.hitl_console_token.arn
+      },
       # Módulo 2 (SAGA): se eliminaron los Sid ExecuteLambda/ExecuteECS/ExecuteRDS
       # (lambda:UpdateFunctionConfiguration, ecs:UpdateService, rds:RebootDBInstance,
       # etc.) -- eran 100% escritura directa AWS, sin lectura legítima asociada
@@ -83,6 +106,7 @@ resource "aws_lambda_function" "hitl" {
       HITL_SNS_TOPIC        = aws_sns_topic.alarms.arn
       GITOPS_TOKEN_SECRET   = aws_secretsmanager_secret.gitops_manifests_token.name
       GITOPS_MANIFESTS_REPO = "kratosvil/saga-gitops-manifests"
+      CONSOLE_TOKEN_PARAM   = aws_ssm_parameter.hitl_console_token.name
     }
   }
 
@@ -112,6 +136,27 @@ resource "aws_apigatewayv2_route" "approve" {
 resource "aws_apigatewayv2_route" "reject" {
   api_id    = aws_apigatewayv2_api.hitl.id
   route_key = "GET /hitl/reject"
+  target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
+}
+
+# Modulo 10: rutas de la consola -- listar pendientes, ver/ajustar una
+# propuesta. Todas pasan por _check_console_auth en el handler (bearer
+# token), a diferencia de approve/reject que son de un solo uso.
+resource "aws_apigatewayv2_route" "pending" {
+  api_id    = aws_apigatewayv2_api.hitl.id
+  route_key = "GET /hitl/pending"
+  target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
+}
+
+resource "aws_apigatewayv2_route" "review_get" {
+  api_id    = aws_apigatewayv2_api.hitl.id
+  route_key = "GET /hitl/review/{token}"
+  target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
+}
+
+resource "aws_apigatewayv2_route" "review_post" {
+  api_id    = aws_apigatewayv2_api.hitl.id
+  route_key = "POST /hitl/review/{token}"
   target    = "integrations/${aws_apigatewayv2_integration.hitl.id}"
 }
 

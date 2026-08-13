@@ -27,3 +27,9 @@ output "hitl_api_url" {
   value       = aws_apigatewayv2_api.hitl.api_endpoint
   description = "URL del API Gateway HITL — approve/reject proposals"
 }
+
+output "hitl_console_token" {
+  value       = random_password.hitl_console_token.result
+  description = "Bearer token para /hitl/pending y /hitl/review/* (Modulo 10) — recuperar con: terraform output -raw hitl_console_token"
+  sensitive   = true
+}

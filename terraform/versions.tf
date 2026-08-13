@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 
   # Backend config via -backend-config flag or terraform.tfbackend (never hardcode)
