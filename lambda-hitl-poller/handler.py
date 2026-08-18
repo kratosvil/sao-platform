@@ -153,7 +153,14 @@ def _alert_firing(alarm_name: str, retries: int = 3) -> bool:
 
 
 def _slugify(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40]
+    # [:40] truncaba antes del sufijo (timestamp/hash) que hace unico el
+    # slug entre corridas del mismo escenario -- causaba colision real de
+    # branch/PR contra una corrida vieja con el mismo prefijo truncado
+    # (encontrado 2026-08-18: "Reference already exists" al reabrir un
+    # guardrail para 'chaos-crash-immediate', ya existia un branch de una
+    # sesion anterior con el mismo slug cortado). 80 deja margen de sobra
+    # para nombres de branch/rama de git y paths de archivo.
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:80]
 
 
 def _open_guardrail_pr(token: str, proposal: dict) -> dict:

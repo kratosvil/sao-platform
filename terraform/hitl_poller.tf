@@ -46,7 +46,14 @@ resource "aws_iam_role_policy" "hitl_poller" {
         Action   = ["s3:ListBucket"]
         Resource = "arn:aws:s3:::${var.graph_bucket_name}"
         Condition = {
-          StringLike = { "s3:prefix" = ["${"proposals/"}*"] }
+          StringLike = {
+            # sao/* -- sin esto, GetObject sobre digital_twin.json cuando
+            # el objeto no existe (no sobrevive un destroy completo) devuelve
+            # AccessDenied en vez de un 404 limpio -- quirk de S3, no hace
+            # falta el archivo pero si el permiso de listar ese prefijo para
+            # que el error sea legible. Hallazgo real 2026-08-18.
+            "s3:prefix" = ["proposals/*", "sao/*"]
+          }
         }
       },
       {
