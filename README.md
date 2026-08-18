@@ -80,6 +80,18 @@ Fixed by adding a fourth context source: the real commit history of the manifest
 
 ---
 
+## Three more real bugs, found running a full incident cycle (2026-08-18)
+
+None of these were hypothetical or found by code review — all three surfaced during a timed, real redeploy-and-incident session, and all three are fixed.
+
+1. **Poller stuck 15 minutes on a resolved incident.** `PROMETHEUS_URL` in Terraform still pointed at the ALB from a torn-down previous session — the ALB Controller creates the ALB at runtime, so its DNS isn't stable across full redeploys and nothing tracked the drift. The poller retried every minute (`Errno 16: Device or resource busy`) against a dead host while the underlying alert had already cleared in the live Prometheus. Fixed the value and added `scripts/saga_sync_alb_urls.sh` (in `argocd-gitops-aws`) so this stops being a manual edit.
+2. **Guardrail PR silently failed to open** (`422: Reference already exists`). `_slugify()` truncated to 40 characters, which cut off the timestamp that made the branch name unique between runs of the same chaos scenario — a new run collided with an old, already-merged branch from a previous session. Raised the limit to 80.
+3. **`AccessDenied` instead of a clean 404** when the Digital Twin file didn't exist (expected — it doesn't survive a full account teardown). The poller's IAM role had `s3:ListBucket` scoped only to `proposals/*`; S3 returns `AccessDenied` rather than `NoSuchKey` for a `GetObject` on a missing key when the caller can't list that prefix. Extended the condition to also cover `sao/*`.
+
+None of these blocked the actual incident-response loop end to end (verified separately, same session: alert fires → Bedrock reasons → PR opens and auto-merges → cluster recovers) — they blocked the *bookkeeping* around it (loop closure, guardrail generation, precedent logging), which is exactly the kind of gap that only shows up once you actually run the full cycle for real instead of trusting the design doc.
+
+---
+
 ## The Digital Twin
 
 Not a list of resources. A **living knowledge graph** with 5 layers:
