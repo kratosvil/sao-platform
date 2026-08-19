@@ -35,6 +35,15 @@ class AlarmEvent(BaseModel):
     resource_type: str
     region: str = AWS_REGION
     account_id: str = ""
+    # El dispatcher (argocd-gitops-aws/lambda-alertmanager-dispatcher) ya
+    # manda esto en el payload -- faltaba en este modelo, asi que Pydantic
+    # lo descartaba en silencio y el path del manifiesto quedaba siempre
+    # fijo en GITOPS_MANIFEST_PATH (overlays/dev), sin importar en que
+    # namespace ocurria el incidente real. Bug real encontrado 2026-08-19:
+    # un incidente en kratosvil-replica-app-prod termino proponiendo un
+    # revert sobre overlays/dev (que calificaba para auto_execute) en vez
+    # de escalar sobre overlays/prod.
+    namespace: str = ""
 
 
 class IncidentResponse(BaseModel):
@@ -84,6 +93,22 @@ def _get_cloudwatch_context(alarm_name: str, node_id: str, region: str) -> dict:
     return context
 
 
+def _resolve_manifest_path(namespace: str) -> str:
+    """
+    Mapea el namespace real del incidente al path del manifiesto GitOps
+    correspondiente -- antes SIEMPRE se usaba GITOPS_MANIFEST_PATH (overlays/
+    dev) sin importar el namespace real, asi que un incidente en
+    kratosvil-replica-app-prod terminaba proponiendo un revert sobre
+    overlays/dev (que califica para auto_execute) en vez de escalar sobre
+    overlays/prod. Convencion: el ultimo segmento del namespace
+    (kratosvil-replica-app-<env>) es el nombre del overlay. Si no matchea
+    ningun overlay conocido, cae al default (comportamiento anterior).
+    """
+    known_overlays = {"dev": "overlays/dev/kustomization.yaml", "prod": "overlays/prod/kustomization.yaml"}
+    env = namespace.rsplit("-", 1)[-1] if namespace else ""
+    return known_overlays.get(env, GITOPS_MANIFEST_PATH)
+
+
 def _get_manifest_tag_history(path: str = GITOPS_MANIFEST_PATH, limit: int = 5) -> list[dict]:
     """
     Fix de contexto real del nucleo (2026-08-12): le pide al Lambda HITL el
@@ -116,7 +141,7 @@ def _get_manifest_tag_history(path: str = GITOPS_MANIFEST_PATH, limit: int = 5) 
         return []
 
 
-def _build_prompt(event: AlarmEvent, graph_context: dict, cw_context: dict, tag_history: list[dict] | None = None) -> str:
+def _build_prompt(event: AlarmEvent, graph_context: dict, cw_context: dict, tag_history: list[dict] | None = None, manifest_path: str = GITOPS_MANIFEST_PATH) -> str:
     return f"""You are an autonomous AWS infrastructure operations agent.
 An alarm has fired. Analyze the full context and propose an exact, safe remediation.
 
@@ -134,7 +159,7 @@ An alarm has fired. Analyze the full context and propose an exact, safe remediat
 ## Infrastructure context (from Digital Twin)
 {json.dumps(graph_context, indent=2, default=str)}
 
-## Deployment history for {GITOPS_MANIFEST_PATH} (real git log, most recent first)
+## Deployment history for {manifest_path} (real git log, most recent first)
 {json.dumps(tag_history or [], indent=2, default=str)}
 The FIRST entry above is the currently deployed (likely broken) revision that
 triggered this incident. If you propose argocd_rollback_via_git, `revert_to`
@@ -310,8 +335,9 @@ def debug_prompt(event: AlarmEvent):
     # mismo revert (hallazgo real: AlertmanagerFailedToSendAlerts). No
     # reemplaza el dedup real (Modulo 12, backlog) -- solo evita contexto
     # irrelevante, no evita llamadas duplicadas a Bedrock.
-    tag_history = _get_manifest_tag_history() if event.alarm_name in GITOPS_RELEVANT_ALARMS else []
-    prompt = _build_prompt(event, graph_context, cw_context, tag_history)
+    manifest_path = _resolve_manifest_path(event.namespace)
+    tag_history = _get_manifest_tag_history(path=manifest_path) if event.alarm_name in GITOPS_RELEVANT_ALARMS else []
+    prompt = _build_prompt(event, graph_context, cw_context, tag_history, manifest_path)
     return {
         "model": BEDROCK_MODEL_ID,
         "max_tokens": BEDROCK_MAX_TOKENS,
@@ -354,11 +380,12 @@ def handle_incident(event: AlarmEvent):
     # mismo revert (hallazgo real: AlertmanagerFailedToSendAlerts). No
     # reemplaza el dedup real (Modulo 12, backlog) -- solo evita contexto
     # irrelevante, no evita llamadas duplicadas a Bedrock.
-    tag_history = _get_manifest_tag_history() if event.alarm_name in GITOPS_RELEVANT_ALARMS else []
+    manifest_path = _resolve_manifest_path(event.namespace)
+    tag_history = _get_manifest_tag_history(path=manifest_path) if event.alarm_name in GITOPS_RELEVANT_ALARMS else []
 
     # 4. Llamar a Bedrock
     bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION)
-    prompt = _build_prompt(event, graph_context, cw_context, tag_history)
+    prompt = _build_prompt(event, graph_context, cw_context, tag_history, manifest_path)
     try:
         resp = bedrock.invoke_model(
             modelId=BEDROCK_MODEL_ID,
