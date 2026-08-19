@@ -92,6 +92,16 @@ None of these blocked the actual incident-response loop end to end (verified sep
 
 ---
 
+## A fourth one, more interesting: the reasoner didn't know which environment was broken (2026-08-19)
+
+`SagaPodCrashLooping` fires the same way whether the crashing pod is in `dev` or `prod` — same alarm name, same remediation logic. The gate that decides `auto_execute` vs `escalate` (see below) checks the *target path* of the proposed fix: only a revert to `overlays/dev/kustomization.yaml` qualifies to auto-merge. Everything else — including the exact same revert aimed at `overlays/prod` — is supposed to always escalate to a human.
+
+The first time a real incident was forced against `prod`, it didn't escalate. It auto-merged a revert to `overlays/dev` instead — the wrong environment, doing nothing to fix the actual broken pod. The dispatcher Lambda was already forwarding the real namespace in the incident payload; the reasoner's Pydantic model (`AlarmEvent`) just never declared that field, so it was silently dropped, and the manifest path context fed to Bedrock stayed hardcoded to `dev` regardless of where the incident actually happened.
+
+Fixed by adding `namespace` to `AlarmEvent` and resolving the target manifest path from it at request time instead of from a fixed environment variable. Re-ran the same test against `prod`: this time the proposal correctly targeted `overlays/prod/kustomization.yaml` and escalated for human approval, exactly as designed. The gate's logic was never wrong — it just never got the input it needed to apply itself to the right target.
+
+---
+
 ## The Digital Twin
 
 Not a list of resources. A **living knowledge graph** with 5 layers:
