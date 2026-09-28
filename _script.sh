@@ -1,22 +1,24 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# Extrae el token de la consola HITL (Modulo 10) y prueba /hitl/pending con
+# el header correcto -- el 401 es normal si se abre la URL directo en el
+# navegador, porque el auth va en header Authorization: Bearer, no en query.
 set -euo pipefail
 
-# Módulo 1 (SAGA): carga el mismo PAT de saga-gitops-manifests en Secrets
-# Manager para que el Lambda HITL lo use en argocd_rollback_via_git.
-# El token nunca se imprime ni queda en ningún archivo de este repo.
+cd "$(dirname "$0")/terraform"
 
-read -rsp "Pegá el mismo PAT de saga-gitops-manifests (Contents+PRs Read&Write): " TOKEN
+echo "== hitl_api_url =="
+HITL_URL=$(terraform output -raw hitl_api_url)
+echo "$HITL_URL"
+
 echo ""
+echo "== hitl_console_token =="
+TOKEN=$(terraform output -raw hitl_console_token)
+echo "$TOKEN"
 
-if [ -z "$TOKEN" ]; then
-  echo "Token vacío, cancelado."
-  exit 1
-fi
+echo ""
+echo "== Probando GET /hitl/pending CON el header (deberia dar 200) =="
+curl -s -i "$HITL_URL/hitl/pending" -H "Authorization: Bearer $TOKEN" | head -20
 
-aws secretsmanager put-secret-value \
-  --secret-id saga/gitops-manifests-token \
-  --secret-string "$TOKEN" \
-  --region us-east-1 > /dev/null
-
-unset TOKEN
-echo "Listo — token cargado en Secrets Manager (saga/gitops-manifests-token)."
+echo ""
+echo "== Probando GET /hitl/pending SIN el header (para comparar -- este SI da 401, es el fail-closed esperado) =="
+curl -s -i "$HITL_URL/hitl/pending" | head -5
